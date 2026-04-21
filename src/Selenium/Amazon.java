@@ -68,7 +68,7 @@ public class Amazon {
         driver.close();
 
         try {
-            driver.switchTo().window(tab.get(2)); // invalid after close
+            driver.switchTo().window(tab.get(2));
         } catch (NoSuchWindowException e) {
             System.out.println("Window already closed");
         }
