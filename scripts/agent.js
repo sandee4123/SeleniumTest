@@ -23,7 +23,7 @@ async function run() {
 
   const files = await res.json();
 
-  // Ignore agent + workflows
+  // Ignore internal files
   const reviewFiles = files.filter(
     (f) =>
       f.patch &&
@@ -52,15 +52,15 @@ Return ONLY JSON:
 [
   {
     "file": "filename",
-    "snippet": "exact or near-exact code line",
+    "snippet": "EXACT FULL LINE from code",
     "comment": "issue"
   }
 ]
 
 Rules:
-- snippet should match a real line from code
-- prefer full line over partial
-- keep snippet short but unique
+- snippet MUST be the exact full line of code (no paraphrasing)
+- do NOT shorten or summarize
+- keep snippet unique and precise
 - no explanation outside JSON
 
 Code:
@@ -81,31 +81,37 @@ ${combinedPatch}
     }
   }
 
-  //  Fuzzy matcher (fixes wrong placements)
   function findBestMatchLine(patch, snippet) {
     const lines = patch.split("\n");
+    const target = snippet.trim().toLowerCase();
 
     let bestIndex = null;
     let bestScore = 0;
 
-    const target = snippet.trim().toLowerCase();
-
     for (let i = 0; i < lines.length; i++) {
       const clean = lines[i].replace(/^[+-]/, "").trim().toLowerCase();
-
       if (!clean) continue;
 
-      let score = 0;
-
-      if (clean === target) score = 100;
-      else if (clean.includes(target)) score = 80;
-      else if (target.includes(clean)) score = 60;
-      else {
-        const words1 = clean.split(/\W+/);
-        const words2 = target.split(/\W+/);
-        const common = words1.filter((w) => words2.includes(w));
-        score = (common.length / (words2.length || 1)) * 50;
+      // Exact match (highest priority)
+      if (clean === target) {
+        return i + 1;
       }
+
+      // Strong partial match
+      if (clean.includes(target) || target.includes(clean)) {
+        const score = 80;
+        if (score > bestScore) {
+          bestScore = score;
+          bestIndex = i;
+        }
+        continue;
+      }
+
+      // Word overlap fallback
+      const words1 = clean.split(/\W+/);
+      const words2 = target.split(/\W+/);
+      const common = words1.filter((w) => words2.includes(w));
+      const score = (common.length / (words2.length || 1)) * 40;
 
       if (score > bestScore) {
         bestScore = score;
@@ -113,12 +119,12 @@ ${combinedPatch}
       }
     }
 
-    if (bestScore < 30) return null;
+    // Reject weak matches
+    if (bestScore < 50) return null;
 
     return bestIndex + 1;
   }
 
-  // Map patch → real file line
   function buildLineMap(patch) {
     const lines = patch.split("\n");
     let map = [];
@@ -181,7 +187,7 @@ ${combinedPatch}
     return;
   }
 
-  // GitHub limit
+  // GitHub limit: 30 comments per request
   const chunkSize = 30;
 
   for (let i = 0; i < comments.length; i += chunkSize) {
