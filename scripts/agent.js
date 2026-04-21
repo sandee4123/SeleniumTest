@@ -1,18 +1,25 @@
-const { context, getOctokit } = require("@actions/github");
 const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 async function run() {
-  const octokit = getOctokit(process.env.GITHUB_TOKEN);
+  const token = process.env.GITHUB_TOKEN;
 
-  const { owner, repo } = context.repo;
-  const pull_number = context.issue.number;
+  const repo = process.env.GITHUB_REPOSITORY; // owner/repo
+  const [owner, repoName] = repo.split("/");
 
-  // 1. Get changed files with patches
-  const { data: files } = await octokit.rest.pulls.listFiles({
-    owner,
-    repo,
-    pull_number,
-  });
+  const pull_number = process.env.GITHUB_REF.match(/refs\/pull\/(\d+)\//)[1];
+
+  // 1. Get changed files
+  const filesRes = await fetch(
+    `https://api.github.com/repos/${owner}/${repoName}/pulls/${pull_number}/files`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+      },
+    }
+  );
+
+  const files = await filesRes.json();
 
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
@@ -22,7 +29,6 @@ async function run() {
   for (const file of files) {
     if (!file.patch) continue;
 
-    // Skip junk files
     if (
       file.filename.includes("package-lock.json") ||
       file.filename.includes("node_modules")
@@ -31,18 +37,10 @@ async function run() {
     const prompt = `
 You are a strict senior code reviewer.
 
-Return ONLY valid JSON in this format:
+Return ONLY valid JSON:
 [
-  {
-    "line": <line_number_in_patch>,
-    "comment": "issue"
-  }
+  { "line": number, "comment": "issue" }
 ]
-
-Rules:
-- Only real issues
-- No praise
-- No explanations outside JSON
 
 File: ${file.filename}
 
@@ -64,28 +62,32 @@ ${file.patch}
         });
       }
     } catch (e) {
-      console.log("Failed parsing for file:", file.filename);
+      console.log("Parse failed:", file.filename);
     }
   }
 
-  if (comments.length === 0) {
-    console.log("No issues found");
-    return;
-  }
+  if (comments.length === 0) return;
 
-  // 2. Post inline review
-  await octokit.rest.pulls.createReview({
-    owner,
-    repo,
-    pull_number,
-    event: "COMMENT",
-    comments: comments.slice(0, 30), // GitHub limit safety
-  });
+  // 2. Post review
+  await fetch(
+    `https://api.github.com/repos/${owner}/${repoName}/pulls/${pull_number}/reviews`,
+    {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+      },
+      body: JSON.stringify({
+        event: "COMMENT",
+        comments: comments.slice(0, 30),
+      }),
+    }
+  );
 
-  console.log("Posted review with", comments.length, "comments");
+  console.log("Review posted");
 }
 
-run().catch((err) => {
-  console.error(err);
+run().catch((e) => {
+  console.error(e);
   process.exit(1);
 });
