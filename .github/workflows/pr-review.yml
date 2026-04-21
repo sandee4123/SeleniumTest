@@ -1,4 +1,4 @@
-name: PR AI Reviewer (Serious)
+name: PR AI Reviewer
 
 on:
   pull_request:
@@ -13,15 +13,13 @@ jobs:
       contents: read
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install Gemini SDK
+      - name: Install deps
         run: npm install @google/generative-ai
 
       - name: Run agent
