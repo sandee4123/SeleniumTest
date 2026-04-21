@@ -1,4 +1,4 @@
-name: PR AI Reviewer (Gemini)
+name: PR AI Reviewer (Serious)
 
 on:
   pull_request:
@@ -7,20 +7,20 @@ on:
 jobs:
   review:
     runs-on: ubuntu-latest
+    permissions:
+      pull-requests: write
+      contents: read
 
     steps:
-      - name: Checkout code
-        uses: actions/checkout@v4
+      - uses: actions/checkout@v4
 
-      - name: Setup Node
-        uses: actions/setup-node@v4
+      - uses: actions/setup-node@v4
         with:
           node-version: 20
 
-      - name: Install deps (runtime)
-        run: npm install @google/generative-ai @actions/github
+      - run: npm install @google/generative-ai @actions/github
 
-      - name: Run reviewer
+      - name: Run agent
         env:
           GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
