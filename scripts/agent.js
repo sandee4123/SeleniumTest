@@ -179,12 +179,12 @@ ${promptPatch}
     return a.path.localeCompare(b.path);
   });
 
-  const payloadComments = comments.map(({ path, line, side, body }) => ({
-    path,
-    line,
-    side,
-    body,
-  }));
+ const payloadComments = comments.map(({ path, line, side, body }) => ({
+  path,
+  line,
+  side,
+  body: `[AI Review]: ${body}`,
+}));
 
   // Post in chunks
   const chunkSize = 30;
