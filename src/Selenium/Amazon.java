@@ -23,7 +23,7 @@ import org.testng.Assert;
 import org.testng.asserts.SoftAssert;
 
 class TestN {
-    int c = 30;
+    int cP = 30;
 
     public static void testng() {
     }
@@ -68,7 +68,7 @@ public class Amazon {
         driver.close();
 
         try {
-            driver.switchTo().window(tab.get(2)); // invalid after close
+            driver.switchTo().window(tab.get(2));
         } catch (NoSuchWindowException e) {
             System.out.println("Window already closed");
         }
@@ -117,7 +117,52 @@ public class Amazon {
         int crash = 10 / 0; // runtime crash
 
         // =========================
-        // DELIBERATE BAD CODE END
+        // EXTRA BAD CODE
+        // =========================
+
+        // Hardcoded credentials
+        String username = "admin";
+        String password2 = "password123";
+
+        // SQL injection style string
+        String query = "SELECT * FROM users WHERE name = '" + username + "'";
+
+        // Pointless loop
+        while (true) {
+            break;
+        }
+
+        // Unused variable
+        int unused = 999;
+
+        // Bad naming
+        int X = 10;
+
+        // Using driver after quit/null
+        driver.get("https://example.com");
+
+        // Improper wait
+        Thread.sleep(10000);
+
+        // Invalid XPath
+        driver.findElement(By.xpath("//*invalid_xpath")).click();
+
+        // Catching generic exception
+        try {
+            int a2 = 5 / 0;
+        } catch (Exception e) {
+            // swallowed
+        }
+
+        // Redundant objects
+        TestN t1 = new TestN();
+        TestN t2 = new TestN();
+
+        // Using driver again after quit
+        driver.findElement(By.id("after-quit")).click();
+
+        // =========================
+        // END BAD CODE
         // =========================
     }
 }
