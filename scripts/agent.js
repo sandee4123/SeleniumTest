@@ -10,6 +10,7 @@ async function run() {
 
   const pull_number = prMatch[1];
 
+  // Fetch PR files
   const res = await fetch(
     `https://api.github.com/repos/${owner}/${repoName}/pulls/${pull_number}/files`,
     {
@@ -27,6 +28,7 @@ async function run() {
 
   let comments = [];
 
+  // Clean JSON parser
   function parseJSON(text) {
     try {
       return JSON.parse(text);
@@ -49,6 +51,8 @@ async function run() {
       file.filename.includes("package-lock.json")
     ) continue;
 
+    console.log("Calling AI for:", file.filename);
+
     let prompt;
 
     if (file.filename.endsWith(".java")) {
@@ -60,19 +64,19 @@ Return ONLY JSON:
   { "line": number, "comment": "issue" }
 ]
 
-Rules:
-- Only real issues
-- No fabricated issues
-- No explanation outside JSON
+Focus on:
+- Thread.sleep usage
+- bad locators
+- driver misuse
+- null risks
+- bad practices
 
 File: ${file.filename}
 
 Patch:
-${file.patch.slice(0, 8000)}
+${file.patch.slice(0, 3000)}
       `;
-    }
-
-    else if (file.filename.includes(".github/workflows")) {
+    } else if (file.filename.includes(".github/workflows")) {
       prompt = `
 You are a CI/CD reviewer.
 
@@ -89,11 +93,9 @@ Focus on:
 File: ${file.filename}
 
 Patch:
-${file.patch.slice(0, 8000)}
+${file.patch.slice(0, 3000)}
       `;
-    }
-
-    else {
+    } else {
       prompt = `
 You are a code reviewer.
 
@@ -105,13 +107,20 @@ Return ONLY JSON:
 File: ${file.filename}
 
 Patch:
-${file.patch.slice(0, 8000)}
+${file.patch.slice(0, 3000)}
       `;
     }
 
     try {
       const result = await model.generateContent(prompt);
-      const text = (await result.response).text();
+
+      let text = "";
+      try {
+        text = result.response.text(); // ✅ FIXED HERE
+      } catch (e) {
+        console.log("Response parse failed:", e.message);
+        continue;
+      }
 
       const parsed = parseJSON(text);
 
@@ -124,8 +133,10 @@ ${file.patch.slice(0, 8000)}
           body: c.comment,
         });
       }
-    } catch {
+
+    } catch (e) {
       console.log("AI failed for:", file.filename);
+      console.log("ERROR:", e.message || e);
     }
   }
 
@@ -134,6 +145,7 @@ ${file.patch.slice(0, 8000)}
     return;
   }
 
+  // GitHub limit: 30 comments per request
   const chunkSize = 30;
 
   for (let i = 0; i < comments.length; i += chunkSize) {
@@ -157,6 +169,6 @@ ${file.patch.slice(0, 8000)}
 }
 
 run().catch((e) => {
-  console.error(e);
+  console.error("FATAL ERROR:", e);
   process.exit(1);
 });
