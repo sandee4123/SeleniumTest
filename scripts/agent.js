@@ -10,7 +10,7 @@ async function run() {
 
   const pull_number = prMatch[1];
 
-  // PR details
+  // ---- PR details (commit_id required for position) ----
   const prRes = await fetch(
     `https://api.github.com/repos/${owner}/${repoName}/pulls/${pull_number}`,
     {
@@ -23,7 +23,7 @@ async function run() {
   const prData = await prRes.json();
   const commit_id = prData.head.sha;
 
-  // Files
+  // ---- PR files ----
   const res = await fetch(
     `https://api.github.com/repos/${owner}/${repoName}/pulls/${pull_number}/files`,
     {
@@ -43,7 +43,10 @@ async function run() {
       !f.filename.startsWith(".github/")
   );
 
-  if (!reviewFiles.length) return;
+  if (!reviewFiles.length) {
+    console.log("No relevant files");
+    return;
+  }
 
   const combinedPatch = reviewFiles
     .map((f) => `FILE: ${f.filename}\n${f.patch}`)
@@ -52,6 +55,7 @@ async function run() {
 
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
+  // ---- STRICT PROMPT (code-snippet anchoring) ----
   const prompt = `
 You are a strict senior code reviewer.
 
@@ -59,23 +63,25 @@ Return ONLY JSON:
 [
   {
     "file": "filename",
-    "line": number,
+    "code": "exact code snippet from patch",
     "type": "issue_category",
     "comment": "issue"
   }
 ]
 
 Rules:
-- ONLY comment on visible code in patch
-- DO NOT hallucinate missing code
-- DO NOT comment on removed lines
+- "code" MUST be an exact substring from the patch
+- NEVER invent code
+- ONLY refer to lines present in the patch
 - DO NOT repeat issues
-- Keep comments precise and relevant
+- Be concise
+- No explanation outside JSON
 
 Code:
 ${combinedPatch}
 `;
 
+  // ---- Gemini fallback (valid models only) ----
   async function callGemini(genAI, prompt) {
     const models = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
 
@@ -87,12 +93,8 @@ ${combinedPatch}
         const text = res.response.text();
         if (text && text.trim()) return text;
       } catch (e) {
-        if (
-          e.message.includes("429") ||
-          e.message.includes("503")
-        ) {
-          continue;
-        }
+        const msg = e.message || "";
+        if (msg.includes("429") || msg.includes("503")) continue;
         throw e;
       }
     }
@@ -100,6 +102,7 @@ ${combinedPatch}
     throw new Error("All models failed");
   }
 
+  // ---- Safe JSON parse ----
   function parseJSON(text) {
     try {
       return JSON.parse(text);
@@ -114,13 +117,12 @@ ${combinedPatch}
     }
   }
 
-  // Build diff positions
+  // ---- Build diff map (exact GitHub positions) ----
   function buildDiffMap(patch) {
     const lines = patch.split("\n");
-
     let pos = 0;
-    const valid = [];
-    const raw = [];
+
+    const map = []; // index → diff position or null
 
     for (let i = 0; i < lines.length; i++) {
       const line = lines[i];
@@ -132,48 +134,38 @@ ${combinedPatch}
         line.startsWith("+++ ") ||
         line.startsWith("@@")
       ) {
-        raw.push(null);
+        map.push(null);
         continue;
       }
 
       pos++;
-      valid.push(pos);
-      raw.push(pos);
+      map.push(pos);
     }
 
-    return { raw, valid, lines };
+    return { lines, map };
   }
 
-  // Semantic anchor (core fix)
-  function findBestPosition(map, comment) {
-    const { lines, raw } = map;
+  // ---- Exact code → position mapping ----
+  function findExactPosition(patchMap, code) {
+    const { lines, map } = patchMap;
 
-    const keywords = comment
-      .toLowerCase()
-      .replace(/[^a-z0-9 ]/g, "")
-      .split(" ")
-      .filter((w) => w.length > 4);
-
-    let bestScore = 0;
-    let bestPos = null;
+    const target = code.trim();
 
     for (let i = 0; i < lines.length; i++) {
-      if (!raw[i]) continue;
+      const raw = lines[i];
 
-      const line = lines[i].toLowerCase();
+      if (!map[i]) continue;
 
-      let score = 0;
-      for (const word of keywords) {
-        if (line.includes(word)) score++;
-      }
+      const clean = raw.replace(/^[+-]/, "").trim();
 
-      if (score > bestScore) {
-        bestScore = score;
-        bestPos = raw[i];
+      if (!clean) continue;
+
+      if (target.includes(clean) || clean.includes(target)) {
+        return map[i];
       }
     }
 
-    return bestPos;
+    return null;
   }
 
   let comments = [];
@@ -183,23 +175,19 @@ ${combinedPatch}
     const parsed = parseJSON(text);
 
     for (const file of reviewFiles) {
-      const map = buildDiffMap(file.patch);
+      const patchMap = buildDiffMap(file.patch);
 
       for (const c of parsed) {
-        if (!c.comment) continue;
+        if (!c.comment || !c.code) continue;
         if (c.file && !file.filename.endsWith(c.file)) continue;
 
-        let position = findBestPosition(map, c.comment);
+        let position = findExactPosition(patchMap, c.code);
 
-        // fallback to line-based if semantic fails
+        // fallback (very rare)
         if (!position) {
-          const idx = (c.line || 1) - 1;
-          position =
-            map.raw[idx] ||
-            map.valid[Math.min(map.valid.length - 1, idx)];
+          console.log("Fallback for:", c.code);
+          position = 1;
         }
-
-        if (!position) continue;
 
         comments.push({
           path: file.filename,
@@ -214,9 +202,12 @@ ${combinedPatch}
     return;
   }
 
-  if (!comments.length) return;
+  if (!comments.length) {
+    console.log("No issues found");
+    return;
+  }
 
-  // dedupe
+  // ---- Deduplicate ----
   const seen = new Set();
   comments = comments.filter((c) => {
     const key = `${c.path}:${c._type}`;
@@ -225,17 +216,20 @@ ${combinedPatch}
     return true;
   });
 
+  // ---- Sort ----
   comments.sort((a, b) => {
     if (a.path === b.path) return a.position - b.position;
     return a.path.localeCompare(b.path);
   });
 
+  // ---- Clean payload ----
   const clean = comments.map(({ path, position, body }) => ({
     path,
     position,
     body,
   }));
 
+  // ---- Post to GitHub ----
   const chunkSize = 30;
 
   for (let i = 0; i < clean.length; i += chunkSize) {
