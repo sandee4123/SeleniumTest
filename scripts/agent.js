@@ -10,7 +10,6 @@ async function run() {
 
   const pull_number = prMatch[1];
 
-  // Fetch PR files
   const res = await fetch(
     `https://api.github.com/repos/${owner}/${repoName}/pulls/${pull_number}/files`,
     {
@@ -28,33 +27,16 @@ async function run() {
 
   let comments = [];
 
-  // 🔥 Robust JSON extractor (handles garbage output)
-  function extractJSON(text) {
+  function parseJSON(text) {
     try {
-      const cleaned = text
-        .replace(/```json/g, "")
-        .replace(/```/g, "")
-        .trim();
-
-      // Try direct parse
-      try {
-        return JSON.parse(cleaned);
-      } catch {}
-
-      // Try extract array
-      const match = cleaned.match(/\[[\s\S]*\]/);
-      if (match) {
-        return JSON.parse(match[0]);
-      }
-
-      // Fallback: convert plain text → comments
-      const lines = cleaned.split("\n").filter(l => l.trim());
-      return lines.slice(0, 5).map((line, i) => ({
-        line: i + 1,
-        comment: "[AI REVIEW] " + line.trim(),
-      }));
-
+      return JSON.parse(text);
     } catch {
+      const match = text.match(/\[[\s\S]*\]/);
+      if (match) {
+        try {
+          return JSON.parse(match[0]);
+        } catch {}
+      }
       return [];
     }
   }
@@ -69,26 +51,19 @@ async function run() {
 
     let prompt;
 
-    // 🔥 Java (Selenium-focused)
     if (file.filename.endsWith(".java")) {
       prompt = `
-You are a strict Selenium reviewer.
+You are a Selenium test reviewer.
 
-You MUST return at least 5 issues.
-
-Output ONLY JSON:
+Return ONLY JSON:
 [
   { "line": number, "comment": "issue" }
 ]
 
 Rules:
-- No explanation
-- No markdown
-- Be aggressive
-- Flag everything (even minor issues)
-- Include: waits, locators, driver misuse, null issues, bad practices
-
-If no issues found, STILL return 5 issues.
+- Only real issues
+- No fabricated issues
+- No explanation outside JSON
 
 File: ${file.filename}
 
@@ -97,23 +72,19 @@ ${file.patch.slice(0, 8000)}
       `;
     }
 
-    // 🔥 Workflow files
     else if (file.filename.includes(".github/workflows")) {
       prompt = `
 You are a CI/CD reviewer.
 
-You MUST return at least 3 issues.
-
-Output ONLY JSON:
+Return ONLY JSON:
 [
   { "line": number, "comment": "issue" }
 ]
 
 Focus on:
-- missing triggers
+- triggers
 - permissions
-- dependency handling
-- version pinning
+- dependency usage
 
 File: ${file.filename}
 
@@ -122,14 +93,11 @@ ${file.patch.slice(0, 8000)}
       `;
     }
 
-    // 🔥 Generic
     else {
       prompt = `
-You are a strict code reviewer.
+You are a code reviewer.
 
-Return at least 3 issues.
-
-Output ONLY JSON:
+Return ONLY JSON:
 [
   { "line": number, "comment": "issue" }
 ]
@@ -145,9 +113,7 @@ ${file.patch.slice(0, 8000)}
       const result = await model.generateContent(prompt);
       const text = (await result.response).text();
 
-      console.log("AI RAW RESPONSE:\n", text); // debug
-
-      const parsed = extractJSON(text);
+      const parsed = parseJSON(text);
 
       for (const c of parsed) {
         if (!c.line || !c.comment) continue;
@@ -158,22 +124,16 @@ ${file.patch.slice(0, 8000)}
           body: c.comment,
         });
       }
-    } catch (e) {
+    } catch {
       console.log("AI failed for:", file.filename);
     }
   }
 
   if (!comments.length) {
-    console.log("Still no issues — forcing fallback comments");
-
-    comments.push({
-      path: files[0]?.filename || "unknown",
-      line: 1,
-      body: "[AI REVIEW] Fallback: Potential issues exist but AI response parsing failed",
-    });
+    console.log("No issues found");
+    return;
   }
 
-  // GitHub limit: 30 per request
   const chunkSize = 30;
 
   for (let i = 0; i < comments.length; i += chunkSize) {
@@ -197,6 +157,6 @@ ${file.patch.slice(0, 8000)}
 }
 
 run().catch((e) => {
-  console.error("ERROR:", e);
+  console.error(e);
   process.exit(1);
 });
