@@ -36,7 +36,7 @@ async function run() {
     return;
   }
 
-  // Combine patches (single call)
+  // Combine patches (single call, quota-safe)
   const combinedPatch = reviewFiles
     .map((f) => `FILE: ${f.filename}\n${f.patch}`)
     .join("\n\n")
@@ -46,22 +46,22 @@ async function run() {
   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
   const prompt = `
-You are a strict senior code reviewer.
+You are a strict code reviewer.
 
 Return ONLY JSON:
 [
   {
     "file": "filename",
-    "snippet": "EXACT FULL LINE from code",
+    "line": number,
     "comment": "issue"
   }
 ]
 
 Rules:
-- snippet MUST be the exact full line of code (no paraphrasing)
-- do NOT shorten or summarize
-- keep snippet unique and precise
-- no explanation outside JSON
+- "line" = line number within the provided patch (starting from 1)
+- Do NOT guess actual file line numbers
+- Be concise and critical
+- No explanation outside JSON
 
 Code:
 ${combinedPatch}
@@ -81,50 +81,7 @@ ${combinedPatch}
     }
   }
 
-  function findBestMatchLine(patch, snippet) {
-    const lines = patch.split("\n");
-    const target = snippet.trim().toLowerCase();
-
-    let bestIndex = null;
-    let bestScore = 0;
-
-    for (let i = 0; i < lines.length; i++) {
-      const clean = lines[i].replace(/^[+-]/, "").trim().toLowerCase();
-      if (!clean) continue;
-
-      // Exact match (highest priority)
-      if (clean === target) {
-        return i + 1;
-      }
-
-      // Strong partial match
-      if (clean.includes(target) || target.includes(clean)) {
-        const score = 80;
-        if (score > bestScore) {
-          bestScore = score;
-          bestIndex = i;
-        }
-        continue;
-      }
-
-      // Word overlap fallback
-      const words1 = clean.split(/\W+/);
-      const words2 = target.split(/\W+/);
-      const common = words1.filter((w) => words2.includes(w));
-      const score = (common.length / (words2.length || 1)) * 40;
-
-      if (score > bestScore) {
-        bestScore = score;
-        bestIndex = i;
-      }
-    }
-
-    // Reject weak matches
-    if (bestScore < 50) return null;
-
-    return bestIndex + 1;
-  }
-
+  // Map patch lines → real file lines
   function buildLineMap(patch) {
     const lines = patch.split("\n");
     let map = [];
@@ -137,10 +94,13 @@ ${combinedPatch}
         continue;
       }
 
+      // Added line
       if (line.startsWith("+") && !line.startsWith("+++")) {
         map.push(currentLine);
         currentLine++;
-      } else if (!line.startsWith("-")) {
+      }
+      // Context line
+      else if (!line.startsWith("-")) {
         currentLine++;
       }
     }
@@ -159,14 +119,11 @@ ${combinedPatch}
       const lineMap = buildLineMap(file.patch);
 
       for (const c of parsed) {
-        if (!c.file || !c.snippet || !c.comment) continue;
+        if (!c.file || !c.line || !c.comment) continue;
 
         if (!file.filename.includes(c.file)) continue;
 
-        const patchIndex = findBestMatchLine(file.patch, c.snippet);
-        if (!patchIndex) continue;
-
-        const realLine = lineMap[patchIndex - 1];
+        const realLine = lineMap[c.line - 1];
         if (!realLine) continue;
 
         comments.push({
