@@ -1,13 +1,27 @@
-name: PR Test
- 
+name: PR AI Reviewer (Gemini)
+
 on:
   pull_request:
     types: [opened, synchronize]
- 
+
 jobs:
-  test:
+  review:
     runs-on: ubuntu-latest
- 
+
     steps:
-      - name: Say Hello
-        run: echo "PR workflow is working"
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install deps (runtime)
+        run: npm install @google/generative-ai @actions/github
+
+      - name: Run reviewer
+        env:
+          GEMINI_API_KEY: ${{ secrets.GEMINI_API_KEY }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: node scripts/agent.js
