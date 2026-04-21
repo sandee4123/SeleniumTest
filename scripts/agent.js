@@ -10,6 +10,19 @@ async function run() {
 
   const pull_number = prMatch[1];
 
+  // Fetch PR details (IMPORTANT: for commit_id)
+  const prRes = await fetch(
+    `https://api.github.com/repos/${owner}/${repoName}/pulls/${pull_number}`,
+    {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
+      },
+    }
+  );
+  const prData = await prRes.json();
+  const commit_id = prData.head.sha;
+
   // Fetch PR files
   const res = await fetch(
     `https://api.github.com/repos/${owner}/${repoName}/pulls/${pull_number}/files`,
@@ -23,7 +36,6 @@ async function run() {
 
   const files = await res.json();
 
-  // Filter relevant files
   const reviewFiles = files.filter(
     (f) =>
       f.patch &&
@@ -36,7 +48,6 @@ async function run() {
     return;
   }
 
-  // Combine patches
   const combinedPatch = reviewFiles
     .map((f) => `FILE: ${f.filename}\n${f.patch}`)
     .join("\n\n")
@@ -60,9 +71,8 @@ Return ONLY JSON:
 
 Rules:
 - "line" = position inside patch (starting from 1)
-- Group similar issues under the same "type"
-- If multiple occurrences exist, mention them in ONE comment
-- Do NOT repeat same issue type for nearby lines
+- Group similar issues under same "type"
+- Do NOT repeat same issue type
 - Be concise
 - No explanation outside JSON
 
@@ -70,7 +80,6 @@ Code:
 ${combinedPatch}
 `;
 
-  // Retry wrapper
   async function callGeminiWithRetry(model, prompt, retries = 3) {
     let delay = 2000;
 
@@ -83,6 +92,7 @@ ${combinedPatch}
 
         if (msg.includes("503") || msg.includes("429")) {
           if (i === retries - 1) throw e;
+
           await new Promise((r) =>
             setTimeout(r, delay + Math.random() * 1000)
           );
@@ -94,7 +104,6 @@ ${combinedPatch}
     }
   }
 
-  // Robust parser
   function parseJSON(text) {
     try {
       return JSON.parse(text);
@@ -106,7 +115,6 @@ ${combinedPatch}
         } catch {}
       }
 
-      // fallback
       const lines = text.split("\n").filter((l) => l.trim());
       return lines.slice(0, 8).map((line, i) => ({
         file: "",
@@ -128,7 +136,6 @@ ${combinedPatch}
 
       for (const c of parsed) {
         if (!c.comment) continue;
-
         if (c.file && !file.filename.endsWith(c.file)) continue;
 
         let pos = c.line || 1;
@@ -144,7 +151,7 @@ ${combinedPatch}
       }
     }
   } catch (e) {
-    console.log("AI failed:", e.message || e);
+    console.error("AI failed:", e.message || e);
     return;
   }
 
@@ -153,7 +160,7 @@ ${combinedPatch}
     return;
   }
 
-  // Deduplicate by type (AI-driven grouping)
+  // Deduplicate by type
   const seen = new Set();
   comments = comments.filter((c) => {
     const key = `${c.path}:${c.type}`;
@@ -168,11 +175,11 @@ ${combinedPatch}
     return a.path.localeCompare(b.path);
   });
 
-  // GitHub limit
+  // GitHub API (IMPORTANT FIX: commit_id)
   const chunkSize = 30;
 
   for (let i = 0; i < comments.length; i += chunkSize) {
-    await fetch(
+    const response = await fetch(
       `https://api.github.com/repos/${owner}/${repoName}/pulls/${pull_number}/reviews`,
       {
         method: "POST",
@@ -181,11 +188,20 @@ ${combinedPatch}
           Accept: "application/vnd.github+json",
         },
         body: JSON.stringify({
+          commit_id,
           event: "COMMENT",
           comments: comments.slice(i, i + chunkSize),
         }),
       }
     );
+
+    const data = await response.json();
+
+    if (!response.ok) {
+      console.error("GitHub API ERROR:", data);
+    } else {
+      console.log("Review chunk posted");
+    }
   }
 
   console.log(`Posted ${comments.length} comments`);
