@@ -10,7 +10,7 @@ async function run() {
 
   const pull_number = prMatch[1];
 
-  // PR details (commit_id REQUIRED for position)
+  // Get PR (commit_id required for position)
   const prRes = await fetch(
     `https://api.github.com/repos/${owner}/${repoName}/pulls/${pull_number}`,
     {
@@ -23,7 +23,7 @@ async function run() {
   const prData = await prRes.json();
   const commit_id = prData.head.sha;
 
-  // PR files
+  // Get files
   const res = await fetch(
     `https://api.github.com/repos/${owner}/${repoName}/pulls/${pull_number}/files`,
     {
@@ -54,7 +54,6 @@ async function run() {
     .slice(0, 6000);
 
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
-  const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
   const prompt = `
 You are a strict senior code reviewer.
@@ -70,38 +69,51 @@ Return ONLY JSON:
 ]
 
 Rules:
-- line = position in patch (starting at 1)
+- "line" = position in patch (starting at 1)
 - group similar issues under same type
-- avoid duplicates
+- do not repeat same issue type
+- be concise
 - no explanation outside JSON
 
 Code:
 ${combinedPatch}
 `;
 
-  async function callGeminiWithRetry(model, prompt, retries = 3) {
-    let delay = 2000;
+  // 🔥 Multi-model fallback
+  async function callGeminiWithFallback(genAI, prompt) {
+    const models = [
+      "gemini-2.5-flash",
+      "gemini-3-flash",
+      "gemini-2.5-flash-lite",
+    ];
 
-    for (let i = 0; i < retries; i++) {
+    for (const name of models) {
       try {
+        console.log("Trying model:", name);
+
+        const model = genAI.getGenerativeModel({ model: name });
         const result = await model.generateContent(prompt);
-        return result.response.text();
+        const text = result.response.text();
+
+        if (text && text.trim().length > 0) {
+          return text;
+        }
       } catch (e) {
         const msg = e.message || "";
 
-        if (msg.includes("503") || msg.includes("429")) {
-          if (i === retries - 1) throw e;
-          await new Promise((r) =>
-            setTimeout(r, delay + Math.random() * 1000)
-          );
-          delay *= 2;
-        } else {
-          throw e;
+        if (msg.includes("429") || msg.includes("503")) {
+          console.log(`${name} failed (quota/overload), trying next...`);
+          continue;
         }
+
+        throw e;
       }
     }
+
+    throw new Error("All Gemini models failed");
   }
 
+  // Robust parser
   function parseJSON(text) {
     try {
       return JSON.parse(text);
@@ -126,7 +138,7 @@ ${combinedPatch}
   let comments = [];
 
   try {
-    const text = await callGeminiWithRetry(model, prompt);
+    const text = await callGeminiWithFallback(genAI, prompt);
     const parsed = parseJSON(text);
 
     for (const file of reviewFiles) {
@@ -144,7 +156,7 @@ ${combinedPatch}
           path: file.filename,
           position: pos,
           body: c.comment,
-          _type: c.type || "general", // INTERNAL ONLY
+          _type: c.type || "general", // internal only
         });
       }
     }
@@ -173,13 +185,14 @@ ${combinedPatch}
     return a.path.localeCompare(b.path);
   });
 
-  // 🔥 IMPORTANT: Strip internal fields before sending
+  // Remove internal fields before sending
   const cleanComments = comments.map(({ path, position, body }) => ({
     path,
     position,
     body,
   }));
 
+  // Post review
   const chunkSize = 30;
 
   for (let i = 0; i < cleanComments.length; i += chunkSize) {
