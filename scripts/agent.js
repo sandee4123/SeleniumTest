@@ -2,19 +2,16 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 
 async function run() {
   const token = process.env.GITHUB_TOKEN;
-
-  const repo = process.env.GITHUB_REPOSITORY; // owner/repo
+  const repo = process.env.GITHUB_REPOSITORY;
   const [owner, repoName] = repo.split("/");
 
   const prMatch = process.env.GITHUB_REF.match(/refs\/pull\/(\d+)\//);
-  if (!prMatch) {
-    console.log("Not a PR context");
-    return;
-  }
+  if (!prMatch) return;
+
   const pull_number = prMatch[1];
 
-  // 1. Get changed files
-  const filesRes = await fetch(
+  // Get PR files
+  const res = await fetch(
     `https://api.github.com/repos/${owner}/${repoName}/pulls/${pull_number}/files`,
     {
       headers: {
@@ -24,25 +21,19 @@ async function run() {
     }
   );
 
-  const files = await filesRes.json();
+  const files = await res.json();
 
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
   let comments = [];
 
-  // Helper: extract valid JSON safely
+  // Safe JSON extractor
   function extractJSON(text) {
     try {
-      const cleaned = text
-        .replace(/```json/g, "")
-        .replace(/```/g, "")
-        .trim();
-
+      const cleaned = text.replace(/```[\s\S]*?```/g, "").trim();
       const match = cleaned.match(/\[.*\]/s);
-      if (!match) return [];
-
-      return JSON.parse(match[0]);
+      return match ? JSON.parse(match[0]) : [];
     } catch {
       return [];
     }
@@ -51,33 +42,30 @@ async function run() {
   for (const file of files) {
     if (!file.patch) continue;
 
-    // Skip noisy files
     if (
-      file.filename.includes("package-lock.json") ||
-      file.filename.includes("node_modules")
+      file.filename.includes("node_modules") ||
+      file.filename.includes("package-lock.json")
     ) continue;
-
-    const patch = file.patch.slice(0, 8000); // prevent huge prompts
 
     const prompt = `
 You are a strict senior code reviewer.
 
-Output MUST be ONLY valid JSON.
-No markdown. No explanation.
+Prefix every comment with: [AI REVIEW]
 
-Format:
+Return ONLY JSON:
 [
   { "line": number, "comment": "issue" }
 ]
 
 Rules:
+- No praise
 - Only real issues
-- If no issues, return []
+- If nothing → []
 
 File: ${file.filename}
 
 Patch:
-${patch}
+${file.patch.slice(0, 8000)}
     `;
 
     try {
@@ -95,36 +83,40 @@ ${patch}
           body: c.comment,
         });
       }
-    } catch (e) {
-      console.log("AI failed for:", file.filename);
+    } catch {
+      continue;
     }
   }
 
-  if (comments.length === 0) {
+  if (!comments.length) {
     console.log("No issues found");
     return;
   }
 
-  // 2. Post review (inline comments)
-  await fetch(
-    `https://api.github.com/repos/${owner}/${repoName}/pulls/${pull_number}/reviews`,
-    {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: "application/vnd.github+json",
-      },
-      body: JSON.stringify({
-        event: "COMMENT",
-        comments: comments.slice(0, 30), // GitHub limit safety
-      }),
-    }
-  );
+  // Chunked posting (GitHub limit)
+  const chunkSize = 30;
+
+  for (let i = 0; i < comments.length; i += chunkSize) {
+    await fetch(
+      `https://api.github.com/repos/${owner}/${repoName}/pulls/${pull_number}/reviews`,
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: "application/vnd.github+json",
+        },
+        body: JSON.stringify({
+          event: "COMMENT",
+          comments: comments.slice(i, i + chunkSize),
+        }),
+      }
+    );
+  }
 
   console.log(`Posted ${comments.length} comments`);
 }
 
-run().catch((err) => {
-  console.error(err);
+run().catch((e) => {
+  console.error(e);
   process.exit(1);
 });
