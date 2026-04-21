@@ -36,7 +36,7 @@ async function run() {
     return;
   }
 
-  // Combine patches (single call)
+  // Combine patches
   const combinedPatch = reviewFiles
     .map((f) => `FILE: ${f.filename}\n${f.patch}`)
     .join("\n\n")
@@ -58,17 +58,16 @@ Return ONLY JSON:
 ]
 
 Rules:
-- line = line number within the patch (starting at 1)
-- point to the exact line where issue occurs
+- "line" = line number inside the patch (starting at 1)
+- be precise, do not approximate
 - avoid duplicates
-- be concise
 - no explanation outside JSON
 
 Code:
 ${combinedPatch}
 `;
 
-  // Retry wrapper (handles 503 / 429)
+  // Retry wrapper
   async function callGeminiWithRetry(model, prompt, retries = 3) {
     let delay = 2000;
 
@@ -81,7 +80,6 @@ ${combinedPatch}
 
         if (msg.includes("503") || msg.includes("429")) {
           if (i === retries - 1) throw e;
-
           await new Promise((r) =>
             setTimeout(r, delay + Math.random() * 1000)
           );
@@ -93,7 +91,7 @@ ${combinedPatch}
     }
   }
 
-  // Robust parser (never returns empty silently)
+  // Robust parser
   function parseJSON(text) {
     try {
       return JSON.parse(text);
@@ -105,7 +103,7 @@ ${combinedPatch}
         } catch {}
       }
 
-      // fallback: convert plain text → comments
+      // fallback: convert plain text to comments
       const lines = text.split("\n").filter((l) => l.trim());
       return lines.slice(0, 8).map((line, i) => ({
         file: "",
@@ -115,30 +113,6 @@ ${combinedPatch}
     }
   }
 
-  // Map patch lines → actual file lines
-  function buildLineMap(patch) {
-    const lines = patch.split("\n");
-    let map = [];
-    let currentLine = 0;
-
-    for (const line of lines) {
-      const match = line.match(/^@@.*\+(\d+)/);
-      if (match) {
-        currentLine = parseInt(match[1], 10);
-        continue;
-      }
-
-      if (line.startsWith("+") && !line.startsWith("+++")) {
-        map.push(currentLine);
-        currentLine++;
-      } else if (!line.startsWith("-")) {
-        currentLine++;
-      }
-    }
-
-    return map;
-  }
-
   let comments = [];
 
   try {
@@ -146,7 +120,7 @@ ${combinedPatch}
     const parsed = parseJSON(text);
 
     for (const file of reviewFiles) {
-      const lineMap = buildLineMap(file.patch);
+      const maxPos = file.patch.split("\n").length;
 
       for (const c of parsed) {
         if (!c.comment) continue;
@@ -154,12 +128,15 @@ ${combinedPatch}
         // relaxed file matching
         if (c.file && !file.filename.endsWith(c.file)) continue;
 
-        const realLine = lineMap[(c.line || 1) - 1] || 1;
+        let pos = c.line || 1;
+
+        // clamp to valid diff range
+        if (pos < 1) pos = 1;
+        if (pos > maxPos) pos = maxPos;
 
         comments.push({
           path: file.filename,
-          line: realLine,
-          side: "RIGHT",
+          position: pos,
           body: c.comment,
         });
       }
@@ -183,7 +160,13 @@ ${combinedPatch}
     return true;
   });
 
-  // GitHub API limit
+  // Sort for cleaner output
+  comments.sort((a, b) => {
+    if (a.path === b.path) return a.position - b.position;
+    return a.path.localeCompare(b.path);
+  });
+
+  // GitHub limit: 30 per request
   const chunkSize = 30;
 
   for (let i = 0; i < comments.length; i += chunkSize) {
