@@ -23,7 +23,7 @@ import org.testng.Assert;
 import org.testng.asserts.SoftAssert;
 
 class TestN {
-    int c = 30;
+    int cP = 30;
 
     public static void testng() {
     }
