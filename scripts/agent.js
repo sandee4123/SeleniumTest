@@ -23,12 +23,50 @@ async function run() {
 
   const files = await res.json();
 
+  // 🔥 filter files (ignore agent + workflows)
+  const reviewFiles = files.filter(
+    (f) =>
+      f.patch &&
+      f.filename !== "scripts/agent.js" &&
+      !f.filename.startsWith(".github/")
+  );
+
+  if (!reviewFiles.length) {
+    console.log("No relevant files to review");
+    return;
+  }
+
+  // 🔥 combine patches (single AI call)
+  const combinedPatch = reviewFiles
+    .map((f) => `FILE: ${f.filename}\n${f.patch}`)
+    .join("\n\n")
+    .slice(0, 6000);
+
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
-  let comments = [];
+  const prompt = `
+You are a strict senior code reviewer.
 
-  // Clean JSON parser
+Return ONLY JSON:
+[
+  {
+    "file": "filename",
+    "snippet": "exact code line or unique part",
+    "comment": "issue"
+  }
+]
+
+Rules:
+- snippet MUST exactly match code
+- keep snippet short and unique
+- focus on real issues only
+- no explanation outside JSON
+
+Code:
+${combinedPatch}
+`;
+
   function parseJSON(text) {
     try {
       return JSON.parse(text);
@@ -43,101 +81,74 @@ async function run() {
     }
   }
 
-  for (const file of files) {
-    if (!file.patch) continue;
+  function findLineFromSnippet(patch, snippet) {
+    const lines = patch.split("\n");
 
-    if (
-      file.filename.includes("node_modules") ||
-      file.filename.includes("package-lock.json")
-    ) continue;
-
-    console.log("Calling AI for:", file.filename);
-
-    let prompt;
-
-    if (file.filename.endsWith(".java")) {
-      prompt = `
-You are a Selenium test reviewer.
-
-Return ONLY JSON:
-[
-  { "line": number, "comment": "issue" }
-]
-
-Focus on:
-- Thread.sleep usage
-- bad locators
-- driver misuse
-- null risks
-- bad practices
-
-File: ${file.filename}
-
-Patch:
-${file.patch.slice(0, 3000)}
-      `;
-    } else if (file.filename.includes(".github/workflows")) {
-      prompt = `
-You are a CI/CD reviewer.
-
-Return ONLY JSON:
-[
-  { "line": number, "comment": "issue" }
-]
-
-Focus on:
-- triggers
-- permissions
-- dependency usage
-
-File: ${file.filename}
-
-Patch:
-${file.patch.slice(0, 3000)}
-      `;
-    } else {
-      prompt = `
-You are a code reviewer.
-
-Return ONLY JSON:
-[
-  { "line": number, "comment": "issue" }
-]
-
-File: ${file.filename}
-
-Patch:
-${file.patch.slice(0, 3000)}
-      `;
+    for (let i = 0; i < lines.length; i++) {
+      const clean = lines[i].replace(/^[+-]/, "").trim();
+      if (clean.includes(snippet.trim())) {
+        return i + 1;
+      }
     }
 
-    try {
-      const result = await model.generateContent(prompt);
+    return null;
+  }
 
-      let text = "";
-      try {
-        text = result.response.text(); // ✅ FIXED HERE
-      } catch (e) {
-        console.log("Response parse failed:", e.message);
+  function buildLineMap(patch) {
+    const lines = patch.split("\n");
+    let map = [];
+    let currentLine = 0;
+
+    for (const line of lines) {
+      const match = line.match(/^@@.*\+(\d+)/);
+      if (match) {
+        currentLine = parseInt(match[1], 10);
         continue;
       }
 
-      const parsed = parseJSON(text);
+      if (line.startsWith("+") && !line.startsWith("+++")) {
+        map.push(currentLine);
+        currentLine++;
+      } else if (!line.startsWith("-")) {
+        currentLine++;
+      }
+    }
+
+    return map;
+  }
+
+  let comments = [];
+
+  try {
+    const result = await model.generateContent(prompt);
+    const text = result.response.text();
+    const parsed = parseJSON(text);
+
+    for (const file of reviewFiles) {
+      const lineMap = buildLineMap(file.patch);
 
       for (const c of parsed) {
-        if (!c.line || !c.comment) continue;
+        if (!c.file || !c.snippet || !c.comment) continue;
+
+        if (!file.filename.includes(c.file)) continue;
+
+        const patchIndex = findLineFromSnippet(file.patch, c.snippet);
+        if (!patchIndex) continue;
+
+        const realLine = lineMap[patchIndex - 1];
+        if (!realLine) continue;
 
         comments.push({
           path: file.filename,
-          line: c.line,
+          line: realLine,
+          side: "RIGHT",
           body: c.comment,
         });
       }
-
-    } catch (e) {
-      console.log("AI failed for:", file.filename);
-      console.log("ERROR:", e.message || e);
     }
+  } catch (e) {
+    console.log("AI failed:", e.message || e);
+    return;
   }
 
   if (!comments.length) {
@@ -145,7 +156,7 @@ ${file.patch.slice(0, 3000)}
     return;
   }
 
-  // GitHub limit: 30 comments per request
+  // GitHub API limit: 30 comments per request
   const chunkSize = 30;
 
   for (let i = 0; i < comments.length; i += chunkSize) {
@@ -169,6 +180,6 @@ ${file.patch.slice(0, 3000)}
 }
 
 run().catch((e) => {
-  console.error("FATAL ERROR:", e);
+  console.error("FATAL:", e);
   process.exit(1);
 });
