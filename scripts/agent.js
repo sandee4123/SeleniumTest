@@ -31,7 +31,11 @@ async function run() {
   // Safe JSON extractor
   function extractJSON(text) {
     try {
-      const cleaned = text.replace(/```[\s\S]*?```/g, "").trim();
+      const cleaned = text
+        .replace(/```json/g, "")
+        .replace(/```/g, "")
+        .trim();
+
       const match = cleaned.match(/\[.*\]/s);
       return match ? JSON.parse(match[0]) : [];
     } catch {
@@ -42,25 +46,36 @@ async function run() {
   for (const file of files) {
     if (!file.patch) continue;
 
+    // Skip noisy files
     if (
       file.filename.includes("node_modules") ||
       file.filename.includes("package-lock.json")
     ) continue;
 
     const prompt = `
-You are a strict senior code reviewer.
+You are a highly critical senior code reviewer.
+
+Your job is to FIND PROBLEMS aggressively.
 
 Prefix every comment with: [AI REVIEW]
 
-Return ONLY JSON:
+Output ONLY JSON:
 [
   { "line": number, "comment": "issue" }
 ]
 
 Rules:
-- No praise
-- Only real issues
-- If nothing → []
+- Be strict. Assume code is flawed.
+- Flag even minor issues
+- Include:
+  - Bad naming
+  - Missing validations
+  - Poor error handling
+  - Performance issues
+  - Test flakiness (important for Selenium)
+- If unsure, still flag as "potential issue"
+
+If truly perfect, return []
 
 File: ${file.filename}
 
@@ -84,7 +99,7 @@ ${file.patch.slice(0, 8000)}
         });
       }
     } catch {
-      continue;
+      console.log("AI failed for:", file.filename);
     }
   }
 
