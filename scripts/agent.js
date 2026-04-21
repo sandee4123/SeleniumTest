@@ -53,16 +53,18 @@ Return ONLY JSON:
   {
     "file": "filename",
     "line": number,
-    "comment": "issue"
+    "type": "issue_category",
+    "comment": "issue description"
   }
 ]
 
 Rules:
-- line = line number in patch (starting at 1)
-- be precise, do not approximate
-- avoid duplicate issues
-- be concise
-- no explanation outside JSON
+- "line" = position inside patch (starting from 1)
+- Group similar issues under the same "type"
+- If multiple occurrences exist, mention them in ONE comment
+- Do NOT repeat same issue type for nearby lines
+- Be concise
+- No explanation outside JSON
 
 Code:
 ${combinedPatch}
@@ -109,19 +111,10 @@ ${combinedPatch}
       return lines.slice(0, 8).map((line, i) => ({
         file: "",
         line: i + 1,
+        type: "general",
         comment: line.trim(),
       }));
     }
-  }
-
-  // Normalize comments for grouping
-  function normalizeComment(body) {
-    return body
-      .toLowerCase()
-      .replace(/t\d+/g, "var")
-      .replace(/\d+/g, "")
-      .replace(/['"`]/g, "")
-      .trim();
   }
 
   let comments = [];
@@ -146,6 +139,7 @@ ${combinedPatch}
           path: file.filename,
           position: pos,
           body: c.comment,
+          type: c.type || "general",
         });
       }
     }
@@ -159,23 +153,14 @@ ${combinedPatch}
     return;
   }
 
-  // 🔥 Semantic grouping (fix duplicate patterns like t1/t2)
-  const grouped = new Map();
-
-  for (const c of comments) {
-    const key = `${c.path}:${normalizeComment(c.body)}`;
-
-    if (!grouped.has(key)) {
-      grouped.set(key, c);
-    } else {
-      const existing = grouped.get(key);
-      if (c.position < existing.position) {
-        grouped.set(key, c);
-      }
-    }
-  }
-
-  comments = Array.from(grouped.values());
+  // Deduplicate by type (AI-driven grouping)
+  const seen = new Set();
+  comments = comments.filter((c) => {
+    const key = `${c.path}:${c.type}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 
   // Sort
   comments.sort((a, b) => {
