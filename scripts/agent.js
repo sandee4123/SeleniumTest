@@ -36,7 +36,7 @@ async function run() {
     return;
   }
 
-  // Combine patches (single call, quota-safe)
+  // Combine patches (single AI call)
   const combinedPatch = reviewFiles
     .map((f) => `FILE: ${f.filename}\n${f.patch}`)
     .join("\n\n")
@@ -58,10 +58,11 @@ Return ONLY JSON:
 ]
 
 Rules:
-- "line" = line number within the provided patch (starting from 1)
-- Do NOT guess actual file line numbers
-- Be concise and critical
-- No explanation outside JSON
+- "line" MUST point to the exact line in the patch where the issue occurs
+- do NOT point to nearby or approximate lines
+- avoid duplicate issues
+- be concise and technical
+- no explanation outside JSON
 
 Code:
 ${combinedPatch}
@@ -94,13 +95,10 @@ ${combinedPatch}
         continue;
       }
 
-      // Added line
       if (line.startsWith("+") && !line.startsWith("+++")) {
         map.push(currentLine);
         currentLine++;
-      }
-      // Context line
-      else if (!line.startsWith("-")) {
+      } else if (!line.startsWith("-")) {
         currentLine++;
       }
     }
@@ -143,6 +141,15 @@ ${combinedPatch}
     console.log("No issues found");
     return;
   }
+
+  //  Deduplicate comments (by file + message)
+  const seen = new Set();
+  comments = comments.filter((c) => {
+    const key = `${c.path}:${c.body}`;
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 
   // GitHub limit: 30 comments per request
   const chunkSize = 30;
