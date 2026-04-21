@@ -43,10 +43,7 @@ async function run() {
       !f.filename.startsWith(".github/")
   );
 
-  if (!reviewFiles.length) {
-    console.log("No relevant files");
-    return;
-  }
+  if (!reviewFiles.length) return;
 
   const combinedPatch = reviewFiles
     .map((f) => `FILE: ${f.filename}\n${f.patch}`)
@@ -69,12 +66,11 @@ Return ONLY JSON:
 ]
 
 Rules:
-- ONLY comment on code present in patch
+- ONLY comment on visible code in patch
 - DO NOT hallucinate missing code
 - DO NOT comment on removed lines
-- DO NOT repeat same issue
-- line = approximate position in patch (1-based)
-- be concise
+- DO NOT repeat issues
+- Keep comments precise and relevant
 
 Code:
 ${combinedPatch}
@@ -85,14 +81,18 @@ ${combinedPatch}
 
     for (const name of models) {
       try {
-        console.log("Trying model:", name);
+        console.log("Trying:", name);
         const model = genAI.getGenerativeModel({ model: name });
         const res = await model.generateContent(prompt);
         const text = res.response.text();
         if (text && text.trim()) return text;
       } catch (e) {
-        const msg = e.message || "";
-        if (msg.includes("429") || msg.includes("503")) continue;
+        if (
+          e.message.includes("429") ||
+          e.message.includes("503")
+        ) {
+          continue;
+        }
         throw e;
       }
     }
@@ -114,15 +114,17 @@ ${combinedPatch}
     }
   }
 
-  // Build diff position maps
+  // Build diff positions
   function buildDiffMap(patch) {
     const lines = patch.split("\n");
 
     let pos = 0;
-    const all = [];
-    const added = [];
+    const valid = [];
+    const raw = [];
 
-    for (const line of lines) {
+    for (let i = 0; i < lines.length; i++) {
+      const line = lines[i];
+
       if (
         line.startsWith("diff --git") ||
         line.startsWith("index ") ||
@@ -130,30 +132,48 @@ ${combinedPatch}
         line.startsWith("+++ ") ||
         line.startsWith("@@")
       ) {
+        raw.push(null);
         continue;
       }
 
       pos++;
-      all.push(pos);
+      valid.push(pos);
+      raw.push(pos);
+    }
 
-      if (line.startsWith("+") && !line.startsWith("+++")) {
-        added.push(pos);
+    return { raw, valid, lines };
+  }
+
+  // Semantic anchor (core fix)
+  function findBestPosition(map, comment) {
+    const { lines, raw } = map;
+
+    const keywords = comment
+      .toLowerCase()
+      .replace(/[^a-z0-9 ]/g, "")
+      .split(" ")
+      .filter((w) => w.length > 4);
+
+    let bestScore = 0;
+    let bestPos = null;
+
+    for (let i = 0; i < lines.length; i++) {
+      if (!raw[i]) continue;
+
+      const line = lines[i].toLowerCase();
+
+      let score = 0;
+      for (const word of keywords) {
+        if (line.includes(word)) score++;
+      }
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestPos = raw[i];
       }
     }
 
-    return { all, added };
-  }
-
-  function mapPosition(index, primary, fallback) {
-    if (primary.length) {
-      const i = Math.min(primary.length - 1, Math.max(0, index));
-      return primary[i];
-    }
-    if (fallback.length) {
-      const i = Math.min(fallback.length - 1, Math.max(0, index));
-      return fallback[i];
-    }
-    return null;
+    return bestPos;
   }
 
   let comments = [];
@@ -163,17 +183,21 @@ ${combinedPatch}
     const parsed = parseJSON(text);
 
     for (const file of reviewFiles) {
-      const { all, added } = buildDiffMap(file.patch);
-
-      if (!all.length) continue;
+      const map = buildDiffMap(file.patch);
 
       for (const c of parsed) {
         if (!c.comment) continue;
         if (c.file && !file.filename.endsWith(c.file)) continue;
 
-        const idx = (c.line || 1) - 1;
+        let position = findBestPosition(map, c.comment);
 
-        const position = mapPosition(idx, all, added);
+        // fallback to line-based if semantic fails
+        if (!position) {
+          const idx = (c.line || 1) - 1;
+          position =
+            map.raw[idx] ||
+            map.valid[Math.min(map.valid.length - 1, idx)];
+        }
 
         if (!position) continue;
 
@@ -190,10 +214,7 @@ ${combinedPatch}
     return;
   }
 
-  if (!comments.length) {
-    console.log("No issues found");
-    return;
-  }
+  if (!comments.length) return;
 
   // dedupe
   const seen = new Set();
