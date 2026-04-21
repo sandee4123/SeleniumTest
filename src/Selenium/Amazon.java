@@ -1,167 +1,169 @@
 package Selenium;
 
-import com.epam.healenium.SelfHealingDriver;
-import org.openqa.selenium.*;
-import org.openqa.selenium.chrome.ChromeDriver;
-import org.openqa.selenium.chrome.ChromeOptions;
-import org.openqa.selenium.support.ui.*;
-import org.testng.Assert;
-import org.testng.asserts.SoftAssert;
-
 import java.io.File;
-import java.time.Duration;
 import java.util.ArrayList;
 import java.util.Iterator;
 import java.util.Set;
 
+import org.openqa.selenium.Alert;
+import org.openqa.selenium.By;
+import org.openqa.selenium.JavascriptExecutor;
+import org.openqa.selenium.Keys;
+import org.openqa.selenium.NoSuchElementException;
+import org.openqa.selenium.NoSuchWindowException;
+import org.openqa.selenium.OutputType;
+import org.openqa.selenium.TakesScreenshot;
+import org.openqa.selenium.WebDriver;
+import org.openqa.selenium.WebElement;
+import org.openqa.selenium.chrome.ChromeDriver;
+import org.openqa.selenium.interactions.Actions;
+import org.openqa.selenium.support.ui.ExpectedConditions;
+import org.openqa.selenium.support.ui.WebDriverWait;
+import org.testng.Assert;
+import org.testng.asserts.SoftAssert;
+
+class TestN {
+    int c = 30;
+    int cP = 30;
+
+public static void testng() {
+}
+}
+
+class TestN2 extends TestN {
+public static void testn3() {
+testng();
+
+TestN a = new TestN();
+a.testng();
+int b = a.c;
+}
+}
+
 public class Amazon {
 
-    static WebDriver driver;
-    static SelfHealingDriver hlmDriver;
+public static void main(String[] args) throws InterruptedException {
 
-    static class TestN {
-        int cP = 30;
+System.setProperty("webdriver.chrome.driver", "C:\\Users\\sreyyi\\Downloads\\chromedriver_win32\\chromedriver.exe");
+WebDriver driver = new ChromeDriver();
 
-        public static void testng() {}
-    }
+driver.navigate().to("https://hide.me/en/proxy");
+Thread.sleep(300);
 
-    static class TestN2 extends TestN {
-        public static void testn3() {
-            testng();
-            TestN a = new TestN();
-            a.testng();
-            int b = a.cP;
-        }
-    }
+driver.findElement(By.xpath("//input[@placeholder='Enter web address']"))
+.sendKeys("http://seleniumpractise.blogspot.com/2017/07/multiple-window-examples.html" + Keys.RETURN);
 
-    public static void main(String[] args) throws InterruptedException {
+Thread.sleep(300);
 
-        System.setProperty("webdriver.chrome.driver", "src/main/resources/chromedriver");
+String parent = driver.getWindowHandle();
 
-        driver = new ChromeDriver(new ChromeOptions());
-        hlmDriver = SelfHealingDriver.create(driver);
+driver.findElement(By.xpath("(//a[@name='link1'])[1]")).click();
+driver.findElement(By.xpath("(//a[@name='link1'])[2]")).click();
 
-        WebDriverWait wait = new WebDriverWait(hlmDriver, Duration.ofSeconds(15));
+Set<String> windowhandles = driver.getWindowHandles();
 
-        hlmDriver.get("https://www.amazon.in");
+ArrayList<String> tab = new ArrayList<String>(windowhandles);
 
-        wait.until(ExpectedConditions.visibilityOfElementLocated(By.id("twotabsearchtextbox")));
+driver.switchTo().window(tab.get(2));
+System.out.println(driver.getTitle());
+driver.close();
 
-        JavascriptExecutor js = (JavascriptExecutor) hlmDriver;
+try {
+driver.switchTo().window(tab.get(2));
+} catch (NoSuchWindowException e) {
+System.out.println("Window already closed");
+}
 
-        js.executeScript("document.querySelector('#twotabsearchtextbox').setAttribute('id','broken-input');");
-        js.executeScript("document.querySelector('#nav-search-submit-button').setAttribute('id','broken-submit');");
-        js.executeScript("document.querySelector('#searchDropdownBox').setAttribute('id','broken-dropdown');");
-        js.executeScript("document.querySelector('#nav-search').className='totally-new-class';");
-        js.executeScript("document.querySelectorAll('a').forEach(a => a.removeAttribute('href'));");
-        js.executeScript("document.querySelectorAll('img').forEach(img => img.setAttribute('alt','broken-img'));");
+driver.quit();
 
-        By searchBox = By.id("twotabsearchtextbox");
-        By searchBtn = By.xpath("//input[@id='nav-search-submit-button']");
-        By dropdown = By.id("searchDropdownBox");
+Iterator a = tab.iterator();
+while (a.hasNext()) {
+System.out.println(a.next());
+}
 
-        find(searchBox).sendKeys("laptop");
+Assert.assertEquals(false, false);
 
-        try {
-            Select select = new Select(find(dropdown));
-            select.selectByIndex(2);
-        } catch (Exception e) {}
+SoftAssert soft = new SoftAssert();
+soft.assertEquals(false, false, "message");
 
-        find(searchBtn).click();
+JavascriptExecutor js = (JavascriptExecutor) driver;
+js.executeScript("window.scrollBy(0,100)");
 
-        wait.until(ExpectedConditions.presenceOfElementLocated(By.cssSelector("div.s-main-slot")));
+File file = ((TakesScreenshot) driver).getScreenshotAs(OutputType.FILE);
 
-        By firstProduct = By.xpath("(//div[@data-component-type='s-search-result']//h2/a)[1]");
+Alert alert = null;
+alert.accept(); // NullPointerException
 
-        try {
-            find(firstProduct).click();
-        } catch (Exception e) {}
+TestN2.testn3();
+TestN b = new TestN2();
+b.testng();
 
-        hlmDriver.navigate().to("https://hide.me/en/proxy");
-        Thread.sleep(300);
+// =========================
+// DELIBERATE BAD CODE START
+// =========================
 
-        hlmDriver.findElement(By.xpath("//input[@placeholder='Enter web address']"))
-                .sendKeys("http://seleniumpractise.blogspot.com/2017/07/multiple-window-examples.html" + Keys.RETURN);
+String password = "admin123"; // hardcoded secret
 
-        Thread.sleep(300);
+if (password == "admin123") { // wrong comparison
+System.out.println("Logged in");
+}
 
-        Set<String> windowhandles = hlmDriver.getWindowHandles();
-        ArrayList<String> tab = new ArrayList<>(windowhandles);
+driver.findElement(By.id("does-not-exist")).click(); // element won't exist
 
-        hlmDriver.switchTo().window(tab.get(2));
-        hlmDriver.close();
+Thread.sleep(5000); // bad practice
 
-        try {
-            hlmDriver.switchTo().window(tab.get(2));
-        } catch (NoSuchWindowException e) {}
+driver = null;
+driver.get("https://google.com"); // NullPointerException
 
-        hlmDriver.quit();
+int crash = 10 / 0; // runtime crash
 
-        Iterator<String> a = tab.iterator();
-        while (a.hasNext()) {
-            System.out.println(a.next());
-        }
+// =========================
+// EXTRA BAD CODE
+// =========================
 
-        Assert.assertEquals(false, false);
+// Hardcoded credentials
+String username = "admin";
+String password2 = "password123";
 
-        SoftAssert soft = new SoftAssert();
-        soft.assertEquals(false, false, "message");
+// SQL injection style string
+String query = "SELECT * FROM users WHERE name = '" + username + "'";
 
-        JavascriptExecutor js2 = (JavascriptExecutor) driver;
-        js2.executeScript("window.scrollBy(0,100)");
+// Pointless loop
+while (true) {
+break;
+}
 
-        File file = ((TakesScreenshot) driver).getScreenshotAs(OutputType.FILE);
+// Unused variable
+int unused = 999;
 
-        Alert alert = null;
-        alert.accept();
+// Bad naming
+int X = 10;
 
-        TestN2.testn3();
+// Using driver after quit/null
+driver.get("https://example.com");
 
-        String password = "admin123";
+// Improper wait
+Thread.sleep(10000);
 
-        if (password == "admin123") {
-            System.out.println("Logged in");
-        }
+// Invalid XPath
+driver.findElement(By.xpath("//*invalid_xpath")).click();
 
-        hlmDriver.findElement(By.id("does-not-exist")).click();
+// Catching generic exception
+try {
+int a2 = 5 / 0;
+} catch (Exception e) {
+// swallowed
+}
 
-        Thread.sleep(5000);
+// Redundant objects
+TestN t1 = new TestN();
+TestN t2 = new TestN();
 
-        driver = null;
-        driver.get("https://google.com");
+// Using driver again after quit
+driver.findElement(By.id("after-quit")).click();
 
-        int crash = 10 / 0;
-
-        String username = "admin";
-        String password2 = "password123";
-
-        String query = "SELECT * FROM users WHERE name = '" + username + "'";
-
-        while (true) {
-            break;
-        }
-
-        int unused = 999;
-
-        int X = 10;
-
-        driver.get("https://example.com");
-
-        Thread.sleep(10000);
-
-        hlmDriver.findElement(By.xpath("//*invalid_xpath")).click();
-
-        try {
-            int a2 = 5 / 0;
-        } catch (Exception e) {}
-
-        TestN t1 = new TestN();
-        TestN t2 = new TestN();
-
-        hlmDriver.findElement(By.id("after-quit")).click();
-    }
-
-    public static WebElement find(By locator) {
-        return hlmDriver.findElement(locator);
-    }
+// =========================
+// END BAD CODE
+// =========================
+}
 }
