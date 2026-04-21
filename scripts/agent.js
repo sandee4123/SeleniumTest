@@ -10,7 +10,7 @@ async function run() {
 
   const pull_number = prMatch[1];
 
-  // Get PR files
+  // Fetch PR files
   const res = await fetch(
     `https://api.github.com/repos/${owner}/${repoName}/pulls/${pull_number}/files`,
     {
@@ -28,7 +28,7 @@ async function run() {
 
   let comments = [];
 
-  // Safe JSON extractor
+  // 🔥 Robust JSON extractor (handles garbage output)
   function extractJSON(text) {
     try {
       const cleaned = text
@@ -36,8 +36,24 @@ async function run() {
         .replace(/```/g, "")
         .trim();
 
-      const match = cleaned.match(/\[.*\]/s);
-      return match ? JSON.parse(match[0]) : [];
+      // Try direct parse
+      try {
+        return JSON.parse(cleaned);
+      } catch {}
+
+      // Try extract array
+      const match = cleaned.match(/\[[\s\S]*\]/);
+      if (match) {
+        return JSON.parse(match[0]);
+      }
+
+      // Fallback: convert plain text → comments
+      const lines = cleaned.split("\n").filter(l => l.trim());
+      return lines.slice(0, 5).map((line, i) => ({
+        line: i + 1,
+        comment: "[AI REVIEW] " + line.trim(),
+      }));
+
     } catch {
       return [];
     }
@@ -46,18 +62,19 @@ async function run() {
   for (const file of files) {
     if (!file.patch) continue;
 
-    // Skip noisy files
     if (
       file.filename.includes("node_modules") ||
       file.filename.includes("package-lock.json")
     ) continue;
 
-    const prompt = `
-You are a highly critical senior code reviewer.
+    let prompt;
 
-Your job is to FIND PROBLEMS aggressively.
+    // 🔥 Java (Selenium-focused)
+    if (file.filename.endsWith(".java")) {
+      prompt = `
+You are a strict Selenium reviewer.
 
-Prefix every comment with: [AI REVIEW]
+You MUST return at least 5 issues.
 
 Output ONLY JSON:
 [
@@ -65,27 +82,70 @@ Output ONLY JSON:
 ]
 
 Rules:
-- Be strict. Assume code is flawed.
-- Flag even minor issues
-- Include:
-  - Bad naming
-  - Missing validations
-  - Poor error handling
-  - Performance issues
-  - Test flakiness (important for Selenium)
-- If unsure, still flag as "potential issue"
+- No explanation
+- No markdown
+- Be aggressive
+- Flag everything (even minor issues)
+- Include: waits, locators, driver misuse, null issues, bad practices
 
-If truly perfect, return []
+If no issues found, STILL return 5 issues.
 
 File: ${file.filename}
 
 Patch:
 ${file.patch.slice(0, 8000)}
-    `;
+      `;
+    }
+
+    // 🔥 Workflow files
+    else if (file.filename.includes(".github/workflows")) {
+      prompt = `
+You are a CI/CD reviewer.
+
+You MUST return at least 3 issues.
+
+Output ONLY JSON:
+[
+  { "line": number, "comment": "issue" }
+]
+
+Focus on:
+- missing triggers
+- permissions
+- dependency handling
+- version pinning
+
+File: ${file.filename}
+
+Patch:
+${file.patch.slice(0, 8000)}
+      `;
+    }
+
+    // 🔥 Generic
+    else {
+      prompt = `
+You are a strict code reviewer.
+
+Return at least 3 issues.
+
+Output ONLY JSON:
+[
+  { "line": number, "comment": "issue" }
+]
+
+File: ${file.filename}
+
+Patch:
+${file.patch.slice(0, 8000)}
+      `;
+    }
 
     try {
       const result = await model.generateContent(prompt);
       const text = (await result.response).text();
+
+      console.log("AI RAW RESPONSE:\n", text); // debug
 
       const parsed = extractJSON(text);
 
@@ -98,17 +158,22 @@ ${file.patch.slice(0, 8000)}
           body: c.comment,
         });
       }
-    } catch {
+    } catch (e) {
       console.log("AI failed for:", file.filename);
     }
   }
 
   if (!comments.length) {
-    console.log("No issues found");
-    return;
+    console.log("Still no issues — forcing fallback comments");
+
+    comments.push({
+      path: files[0]?.filename || "unknown",
+      line: 1,
+      body: "[AI REVIEW] Fallback: Potential issues exist but AI response parsing failed",
+    });
   }
 
-  // Chunked posting (GitHub limit)
+  // GitHub limit: 30 per request
   const chunkSize = 30;
 
   for (let i = 0; i < comments.length; i += chunkSize) {
@@ -132,6 +197,6 @@ ${file.patch.slice(0, 8000)}
 }
 
 run().catch((e) => {
-  console.error(e);
+  console.error("ERROR:", e);
   process.exit(1);
 });
