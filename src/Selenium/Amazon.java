@@ -27,6 +27,7 @@ public class Amazon {
 class TestN {
     int c = 30;
     int cP = 30;
+    int ap=90;
 
 public static void testng() {
 }
