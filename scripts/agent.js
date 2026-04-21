@@ -23,7 +23,7 @@ async function run() {
 
   const files = await res.json();
 
-  // 🔥 filter files (ignore agent + workflows)
+  // Ignore agent + workflows
   const reviewFiles = files.filter(
     (f) =>
       f.patch &&
@@ -36,7 +36,7 @@ async function run() {
     return;
   }
 
-  // 🔥 combine patches (single AI call)
+  // Combine patches (single call)
   const combinedPatch = reviewFiles
     .map((f) => `FILE: ${f.filename}\n${f.patch}`)
     .join("\n\n")
@@ -52,15 +52,15 @@ Return ONLY JSON:
 [
   {
     "file": "filename",
-    "snippet": "exact code line or unique part",
+    "snippet": "exact or near-exact code line",
     "comment": "issue"
   }
 ]
 
 Rules:
-- snippet MUST exactly match code
-- keep snippet short and unique
-- focus on real issues only
+- snippet should match a real line from code
+- prefer full line over partial
+- keep snippet short but unique
 - no explanation outside JSON
 
 Code:
@@ -81,19 +81,44 @@ ${combinedPatch}
     }
   }
 
-  function findLineFromSnippet(patch, snippet) {
+  //  Fuzzy matcher (fixes wrong placements)
+  function findBestMatchLine(patch, snippet) {
     const lines = patch.split("\n");
 
+    let bestIndex = null;
+    let bestScore = 0;
+
+    const target = snippet.trim().toLowerCase();
+
     for (let i = 0; i < lines.length; i++) {
-      const clean = lines[i].replace(/^[+-]/, "").trim();
-      if (clean.includes(snippet.trim())) {
-        return i + 1;
+      const clean = lines[i].replace(/^[+-]/, "").trim().toLowerCase();
+
+      if (!clean) continue;
+
+      let score = 0;
+
+      if (clean === target) score = 100;
+      else if (clean.includes(target)) score = 80;
+      else if (target.includes(clean)) score = 60;
+      else {
+        const words1 = clean.split(/\W+/);
+        const words2 = target.split(/\W+/);
+        const common = words1.filter((w) => words2.includes(w));
+        score = (common.length / (words2.length || 1)) * 50;
+      }
+
+      if (score > bestScore) {
+        bestScore = score;
+        bestIndex = i;
       }
     }
 
-    return null;
+    if (bestScore < 30) return null;
+
+    return bestIndex + 1;
   }
 
+  // Map patch → real file line
   function buildLineMap(patch) {
     const lines = patch.split("\n");
     let map = [];
@@ -132,7 +157,7 @@ ${combinedPatch}
 
         if (!file.filename.includes(c.file)) continue;
 
-        const patchIndex = findLineFromSnippet(file.patch, c.snippet);
+        const patchIndex = findBestMatchLine(file.patch, c.snippet);
         if (!patchIndex) continue;
 
         const realLine = lineMap[patchIndex - 1];
@@ -156,7 +181,7 @@ ${combinedPatch}
     return;
   }
 
-  // GitHub API limit: 30 comments per request
+  // GitHub limit
   const chunkSize = 30;
 
   for (let i = 0; i < comments.length; i += chunkSize) {
