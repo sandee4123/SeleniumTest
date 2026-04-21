@@ -10,7 +10,7 @@ async function run() {
 
   const pull_number = prMatch[1];
 
-  // Fetch PR details (IMPORTANT: for commit_id)
+  // PR details (commit_id REQUIRED for position)
   const prRes = await fetch(
     `https://api.github.com/repos/${owner}/${repoName}/pulls/${pull_number}`,
     {
@@ -23,7 +23,7 @@ async function run() {
   const prData = await prRes.json();
   const commit_id = prData.head.sha;
 
-  // Fetch PR files
+  // PR files
   const res = await fetch(
     `https://api.github.com/repos/${owner}/${repoName}/pulls/${pull_number}/files`,
     {
@@ -70,11 +70,10 @@ Return ONLY JSON:
 ]
 
 Rules:
-- "line" = position inside patch (starting from 1)
-- Group similar issues under same "type"
-- Do NOT repeat same issue type
-- Be concise
-- No explanation outside JSON
+- line = position in patch (starting at 1)
+- group similar issues under same type
+- avoid duplicates
+- no explanation outside JSON
 
 Code:
 ${combinedPatch}
@@ -92,7 +91,6 @@ ${combinedPatch}
 
         if (msg.includes("503") || msg.includes("429")) {
           if (i === retries - 1) throw e;
-
           await new Promise((r) =>
             setTimeout(r, delay + Math.random() * 1000)
           );
@@ -146,7 +144,7 @@ ${combinedPatch}
           path: file.filename,
           position: pos,
           body: c.comment,
-          type: c.type || "general",
+          _type: c.type || "general", // INTERNAL ONLY
         });
       }
     }
@@ -163,7 +161,7 @@ ${combinedPatch}
   // Deduplicate by type
   const seen = new Set();
   comments = comments.filter((c) => {
-    const key = `${c.path}:${c.type}`;
+    const key = `${c.path}:${c._type}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -175,10 +173,16 @@ ${combinedPatch}
     return a.path.localeCompare(b.path);
   });
 
-  // GitHub API (IMPORTANT FIX: commit_id)
+  // 🔥 IMPORTANT: Strip internal fields before sending
+  const cleanComments = comments.map(({ path, position, body }) => ({
+    path,
+    position,
+    body,
+  }));
+
   const chunkSize = 30;
 
-  for (let i = 0; i < comments.length; i += chunkSize) {
+  for (let i = 0; i < cleanComments.length; i += chunkSize) {
     const response = await fetch(
       `https://api.github.com/repos/${owner}/${repoName}/pulls/${pull_number}/reviews`,
       {
@@ -190,7 +194,7 @@ ${combinedPatch}
         body: JSON.stringify({
           commit_id,
           event: "COMMENT",
-          comments: comments.slice(i, i + chunkSize),
+          comments: cleanComments.slice(i, i + chunkSize),
         }),
       }
     );
@@ -204,7 +208,7 @@ ${combinedPatch}
     }
   }
 
-  console.log(`Posted ${comments.length} comments`);
+  console.log(`Posted ${cleanComments.length} comments`);
 }
 
 run().catch((e) => {
