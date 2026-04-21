@@ -46,7 +46,7 @@ async function run() {
   const model = genAI.getGenerativeModel({ model: "gemini-2.5-flash" });
 
   const prompt = `
-You are a strict code reviewer.
+You are a strict senior code reviewer.
 
 Return ONLY JSON:
 [
@@ -58,9 +58,10 @@ Return ONLY JSON:
 ]
 
 Rules:
-- "line" = line number inside the patch (starting at 1)
+- line = line number in patch (starting at 1)
 - be precise, do not approximate
-- avoid duplicates
+- avoid duplicate issues
+- be concise
 - no explanation outside JSON
 
 Code:
@@ -103,7 +104,7 @@ ${combinedPatch}
         } catch {}
       }
 
-      // fallback: convert plain text to comments
+      // fallback
       const lines = text.split("\n").filter((l) => l.trim());
       return lines.slice(0, 8).map((line, i) => ({
         file: "",
@@ -111,6 +112,16 @@ ${combinedPatch}
         comment: line.trim(),
       }));
     }
+  }
+
+  // Normalize comments for grouping
+  function normalizeComment(body) {
+    return body
+      .toLowerCase()
+      .replace(/t\d+/g, "var")
+      .replace(/\d+/g, "")
+      .replace(/['"`]/g, "")
+      .trim();
   }
 
   let comments = [];
@@ -125,12 +136,9 @@ ${combinedPatch}
       for (const c of parsed) {
         if (!c.comment) continue;
 
-        // relaxed file matching
         if (c.file && !file.filename.endsWith(c.file)) continue;
 
         let pos = c.line || 1;
-
-        // clamp to valid diff range
         if (pos < 1) pos = 1;
         if (pos > maxPos) pos = maxPos;
 
@@ -151,22 +159,31 @@ ${combinedPatch}
     return;
   }
 
-  // Deduplicate
-  const seen = new Set();
-  comments = comments.filter((c) => {
-    const key = `${c.path}:${c.body}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
+  // 🔥 Semantic grouping (fix duplicate patterns like t1/t2)
+  const grouped = new Map();
 
-  // Sort for cleaner output
+  for (const c of comments) {
+    const key = `${c.path}:${normalizeComment(c.body)}`;
+
+    if (!grouped.has(key)) {
+      grouped.set(key, c);
+    } else {
+      const existing = grouped.get(key);
+      if (c.position < existing.position) {
+        grouped.set(key, c);
+      }
+    }
+  }
+
+  comments = Array.from(grouped.values());
+
+  // Sort
   comments.sort((a, b) => {
     if (a.path === b.path) return a.position - b.position;
     return a.path.localeCompare(b.path);
   });
 
-  // GitHub limit: 30 per request
+  // GitHub limit
   const chunkSize = 30;
 
   for (let i = 0; i < comments.length; i += chunkSize) {
