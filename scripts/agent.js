@@ -10,7 +10,7 @@ async function run() {
 
   const pull_number = prMatch[1];
 
-  // Get PR (commit_id required for position)
+  // PR details
   const prRes = await fetch(
     `https://api.github.com/repos/${owner}/${repoName}/pulls/${pull_number}`,
     {
@@ -23,7 +23,7 @@ async function run() {
   const prData = await prRes.json();
   const commit_id = prData.head.sha;
 
-  // Get files
+  // Files
   const res = await fetch(
     `https://api.github.com/repos/${owner}/${repoName}/pulls/${pull_number}/files`,
     {
@@ -43,10 +43,7 @@ async function run() {
       !f.filename.startsWith(".github/")
   );
 
-  if (!reviewFiles.length) {
-    console.log("No relevant files to review");
-    return;
-  }
+  if (!reviewFiles.length) return;
 
   const combinedPatch = reviewFiles
     .map((f) => `FILE: ${f.filename}\n${f.patch}`)
@@ -69,50 +66,37 @@ Return ONLY JSON:
 ]
 
 Rules:
-- "line" = position in patch (starting at 1)
-- group similar issues under same type
-- do not repeat same issue type
-- be concise
+- line = approximate line in patch (starting at 1)
+- focus on added/modified code
+- avoid duplicates
 - no explanation outside JSON
 
 Code:
 ${combinedPatch}
 `;
 
-  // 🔥 Multi-model fallback
-  async function callGeminiWithFallback(genAI, prompt) {
-    const models = [
-      "gemini-2.5-flash",
-      "gemini-2.5-flash-lite",
-    ];
+  async function callGemini(genAI, prompt) {
+    const models = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
 
     for (const name of models) {
       try {
-        console.log("Trying model:", name);
-
         const model = genAI.getGenerativeModel({ model: name });
-        const result = await model.generateContent(prompt);
-        const text = result.response.text();
-
-        if (text && text.trim().length > 0) {
-          return text;
-        }
+        const res = await model.generateContent(prompt);
+        const text = res.response.text();
+        if (text && text.trim()) return text;
       } catch (e) {
-        const msg = e.message || "";
-
-        if (msg.includes("429") || msg.includes("503")) {
-          console.log(`${name} failed (quota/overload), trying next...`);
+        if (
+          e.message.includes("429") ||
+          e.message.includes("503")
+        )
           continue;
-        }
-
         throw e;
       }
     }
 
-    throw new Error("All Gemini models failed");
+    throw new Error("All models failed");
   }
 
-  // Robust parser
   function parseJSON(text) {
     try {
       return JSON.parse(text);
@@ -123,39 +107,83 @@ ${combinedPatch}
           return JSON.parse(match[0]);
         } catch {}
       }
-
-      const lines = text.split("\n").filter((l) => l.trim());
-      return lines.slice(0, 8).map((line, i) => ({
-        file: "",
-        line: i + 1,
-        type: "general",
-        comment: line.trim(),
-      }));
+      return [];
     }
+  }
+
+  // 🔥 EXACT DIFF POSITION MAPPING
+  function buildDiffMap(patch) {
+    const lines = patch.split("\n");
+
+    let diffPos = 0;
+
+    const allPositions = [];
+    const addedPositions = [];
+
+    for (const line of lines) {
+      // skip metadata
+      if (
+        line.startsWith("diff --git") ||
+        line.startsWith("index ") ||
+        line.startsWith("--- ") ||
+        line.startsWith("+++ ") ||
+        line.startsWith("@@")
+      ) {
+        continue;
+      }
+
+      diffPos++;
+
+      allPositions.push(diffPos);
+
+      if (line.startsWith("+") && !line.startsWith("+++")) {
+        addedPositions.push(diffPos);
+      }
+    }
+
+    return { allPositions, addedPositions };
+  }
+
+  function mapToClosestPosition(targetIndex, positions) {
+    if (!positions.length) return null;
+
+    const idx = Math.min(
+      positions.length - 1,
+      Math.max(0, targetIndex)
+    );
+
+    return positions[idx];
   }
 
   let comments = [];
 
   try {
-    const text = await callGeminiWithFallback(genAI, prompt);
+    const text = await callGemini(genAI, prompt);
     const parsed = parseJSON(text);
 
     for (const file of reviewFiles) {
-      const maxPos = file.patch.split("\n").length;
+      const { addedPositions } = buildDiffMap(file.patch);
+
+      if (!addedPositions.length) continue;
 
       for (const c of parsed) {
         if (!c.comment) continue;
         if (c.file && !file.filename.endsWith(c.file)) continue;
 
-        let pos = c.line || 1;
-        if (pos < 1) pos = 1;
-        if (pos > maxPos) pos = maxPos;
+        const approxIndex = (c.line || 1) - 1;
+
+        const position = mapToClosestPosition(
+          approxIndex,
+          addedPositions
+        );
+
+        if (!position) continue;
 
         comments.push({
           path: file.filename,
-          position: pos,
+          position,
           body: c.comment,
-          _type: c.type || "general", // internal only
+          _type: c.type || "general",
         });
       }
     }
@@ -164,12 +192,9 @@ ${combinedPatch}
     return;
   }
 
-  if (!comments.length) {
-    console.log("No issues found");
-    return;
-  }
+  if (!comments.length) return;
 
-  // Deduplicate by type
+  // Deduplicate
   const seen = new Set();
   comments = comments.filter((c) => {
     const key = `${c.path}:${c._type}`;
@@ -178,24 +203,21 @@ ${combinedPatch}
     return true;
   });
 
-  // Sort
   comments.sort((a, b) => {
     if (a.path === b.path) return a.position - b.position;
     return a.path.localeCompare(b.path);
   });
 
-  // Remove internal fields before sending
-  const cleanComments = comments.map(({ path, position, body }) => ({
+  const clean = comments.map(({ path, position, body }) => ({
     path,
     position,
     body,
   }));
 
-  // Post review
   const chunkSize = 30;
 
-  for (let i = 0; i < cleanComments.length; i += chunkSize) {
-    const response = await fetch(
+  for (let i = 0; i < clean.length; i += chunkSize) {
+    const res = await fetch(
       `https://api.github.com/repos/${owner}/${repoName}/pulls/${pull_number}/reviews`,
       {
         method: "POST",
@@ -206,21 +228,19 @@ ${combinedPatch}
         body: JSON.stringify({
           commit_id,
           event: "COMMENT",
-          comments: cleanComments.slice(i, i + chunkSize),
+          comments: clean.slice(i, i + chunkSize),
         }),
       }
     );
 
-    const data = await response.json();
+    const data = await res.json();
 
-    if (!response.ok) {
+    if (!res.ok) {
       console.error("GitHub API ERROR:", data);
-    } else {
-      console.log("Review chunk posted");
     }
   }
 
-  console.log(`Posted ${cleanComments.length} comments`);
+  console.log(`Posted ${clean.length} comments`);
 }
 
 run().catch((e) => {
