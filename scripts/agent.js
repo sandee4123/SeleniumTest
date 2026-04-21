@@ -71,8 +71,8 @@ Return ONLY JSON:
 ]
 
 Rules:
-- line MUST refer to added lines in patch
-- ONLY comment on code present
+- line = approximate line in patch
+- ONLY comment on visible code
 - DO NOT hallucinate
 - DO NOT repeat issues
 - Be concise
@@ -89,6 +89,7 @@ ${combinedPatch}
       try {
         console.log("Trying:", name);
         const model = genAI.getGenerativeModel({ model: name });
+
         const res = await model.generateContent(prompt);
         const text = res.response.text();
 
@@ -118,29 +119,28 @@ ${combinedPatch}
     }
   }
 
-  // ---- BUILD VALID LINE MAP (ONLY + lines) ----
-  function buildLineMap(patch) {
+  // ---- BUILD POSITION MAP (CORRECT) ----
+  function buildPositionMap(patch) {
     const lines = patch.split("\n");
 
-    let currentLine = 0;
+    let position = 0;
     const map = [];
 
     for (const line of lines) {
-      const match = line.match(/^@@.*\+(\d+)/);
-
-      if (match) {
-        currentLine = parseInt(match[1], 10);
+      // skip metadata
+      if (
+        line.startsWith("diff --git") ||
+        line.startsWith("index ") ||
+        line.startsWith("--- ") ||
+        line.startsWith("+++ ") ||
+        line.startsWith("@@")
+      ) {
+        map.push(null);
         continue;
       }
 
-      if (line.startsWith("+") && !line.startsWith("+++")) {
-        map.push(currentLine);
-        currentLine++;
-      } else if (line.startsWith("-")) {
-        continue;
-      } else {
-        currentLine++;
-      }
+      position++;
+      map.push(position);
     }
 
     return map;
@@ -153,9 +153,11 @@ ${combinedPatch}
     const parsed = parseJSON(text);
 
     for (const file of reviewFiles) {
-      const lineMap = buildLineMap(file.patch);
+      const posMap = buildPositionMap(file.patch);
 
-      if (!lineMap.length) continue;
+      const validPositions = posMap.filter((p) => p !== null);
+
+      if (!validPositions.length) continue;
 
       for (const c of parsed) {
         if (!c.comment) continue;
@@ -164,14 +166,20 @@ ${combinedPatch}
         let idx = (c.line || 1) - 1;
 
         if (idx < 0) idx = 0;
-        if (idx >= lineMap.length) idx = lineMap.length - 1;
+        if (idx >= posMap.length) idx = posMap.length - 1;
 
-        const realLine = lineMap[idx];
+        let position = posMap[idx];
+
+        // fallback if landed on null
+        if (!position) {
+          position = validPositions[Math.min(validPositions.length - 1, idx)];
+        }
+
+        if (!position) continue;
 
         comments.push({
           path: file.filename,
-          line: realLine,
-          side: "RIGHT",
+          position,
           body: c.comment,
           _type: c.type || "general",
         });
@@ -198,15 +206,14 @@ ${combinedPatch}
 
   // ---- Sort ----
   comments.sort((a, b) => {
-    if (a.path === b.path) return a.line - b.line;
+    if (a.path === b.path) return a.position - b.position;
     return a.path.localeCompare(b.path);
   });
 
   // ---- Clean payload ----
-  const clean = comments.map(({ path, line, side, body }) => ({
+  const clean = comments.map(({ path, position, body }) => ({
     path,
-    line,
-    side,
+    position,
     body,
   }));
 
