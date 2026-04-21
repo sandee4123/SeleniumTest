@@ -10,7 +10,7 @@ async function run() {
 
   const pull_number = prMatch[1];
 
-  // ---- PR details (needed for review API) ----
+  // ---- PR details ----
   const prRes = await fetch(
     `https://api.github.com/repos/${owner}/${repoName}/pulls/${pull_number}`,
     {
@@ -48,7 +48,7 @@ async function run() {
     return;
   }
 
-  // ---- Combine patch (single AI call) ----
+  // ---- Combine patch ----
   const combinedPatch = reviewFiles
     .map((f) => `FILE: ${f.filename}\n${f.patch}`)
     .join("\n\n")
@@ -56,7 +56,7 @@ async function run() {
 
   const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
-  // ---- SIMPLE + STRICT PROMPT ----
+  // ---- Prompt ----
   const prompt = `
 You are a strict senior code reviewer.
 
@@ -71,7 +71,7 @@ Return ONLY JSON:
 ]
 
 Rules:
-- line MUST be accurate (based on patch)
+- line MUST refer to added lines in patch
 - ONLY comment on code present
 - DO NOT hallucinate
 - DO NOT repeat issues
@@ -89,18 +89,13 @@ ${combinedPatch}
       try {
         console.log("Trying:", name);
         const model = genAI.getGenerativeModel({ model: name });
-
         const res = await model.generateContent(prompt);
         const text = res.response.text();
 
         if (text && text.trim()) return text;
       } catch (e) {
         const msg = e.message || "";
-
-        if (msg.includes("429") || msg.includes("503")) {
-          continue;
-        }
-
+        if (msg.includes("429") || msg.includes("503")) continue;
         throw e;
       }
     }
@@ -123,6 +118,34 @@ ${combinedPatch}
     }
   }
 
+  // ---- BUILD VALID LINE MAP (ONLY + lines) ----
+  function buildLineMap(patch) {
+    const lines = patch.split("\n");
+
+    let currentLine = 0;
+    const map = [];
+
+    for (const line of lines) {
+      const match = line.match(/^@@.*\+(\d+)/);
+
+      if (match) {
+        currentLine = parseInt(match[1], 10);
+        continue;
+      }
+
+      if (line.startsWith("+") && !line.startsWith("+++")) {
+        map.push(currentLine);
+        currentLine++;
+      } else if (line.startsWith("-")) {
+        continue;
+      } else {
+        currentLine++;
+      }
+    }
+
+    return map;
+  }
+
   let comments = [];
 
   try {
@@ -130,17 +153,27 @@ ${combinedPatch}
     const parsed = parseJSON(text);
 
     for (const file of reviewFiles) {
+      const lineMap = buildLineMap(file.patch);
+
+      if (!lineMap.length) continue;
+
       for (const c of parsed) {
         if (!c.comment) continue;
-
         if (c.file && !file.filename.endsWith(c.file)) continue;
+
+        let idx = (c.line || 1) - 1;
+
+        if (idx < 0) idx = 0;
+        if (idx >= lineMap.length) idx = lineMap.length - 1;
+
+        const realLine = lineMap[idx];
 
         comments.push({
           path: file.filename,
-          line: c.line || 1,
+          line: realLine,
           side: "RIGHT",
           body: c.comment,
-          _type: c.type || "general", // internal only
+          _type: c.type || "general",
         });
       }
     }
@@ -154,7 +187,7 @@ ${combinedPatch}
     return;
   }
 
-  // ---- Deduplicate by type ----
+  // ---- Deduplicate ----
   const seen = new Set();
   comments = comments.filter((c) => {
     const key = `${c.path}:${c._type}`;
