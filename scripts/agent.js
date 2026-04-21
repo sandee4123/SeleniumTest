@@ -23,7 +23,7 @@ async function run() {
 
   const files = await res.json();
 
-  // Ignore internal files
+  // Filter relevant files
   const reviewFiles = files.filter(
     (f) =>
       f.patch &&
@@ -36,7 +36,7 @@ async function run() {
     return;
   }
 
-  // Combine patches (single AI call)
+  // Combine patches (single call)
   const combinedPatch = reviewFiles
     .map((f) => `FILE: ${f.filename}\n${f.patch}`)
     .join("\n\n")
@@ -58,16 +58,42 @@ Return ONLY JSON:
 ]
 
 Rules:
-- "line" MUST point to the exact line in the patch where the issue occurs
-- do NOT point to nearby or approximate lines
-- avoid duplicate issues
-- be concise and technical
+- line = line number within the patch (starting at 1)
+- point to the exact line where issue occurs
+- avoid duplicates
+- be concise
 - no explanation outside JSON
 
 Code:
 ${combinedPatch}
 `;
 
+  // Retry wrapper (handles 503 / 429)
+  async function callGeminiWithRetry(model, prompt, retries = 3) {
+    let delay = 2000;
+
+    for (let i = 0; i < retries; i++) {
+      try {
+        const result = await model.generateContent(prompt);
+        return result.response.text();
+      } catch (e) {
+        const msg = e.message || "";
+
+        if (msg.includes("503") || msg.includes("429")) {
+          if (i === retries - 1) throw e;
+
+          await new Promise((r) =>
+            setTimeout(r, delay + Math.random() * 1000)
+          );
+          delay *= 2;
+        } else {
+          throw e;
+        }
+      }
+    }
+  }
+
+  // Robust parser (never returns empty silently)
   function parseJSON(text) {
     try {
       return JSON.parse(text);
@@ -78,11 +104,18 @@ ${combinedPatch}
           return JSON.parse(match[0]);
         } catch {}
       }
-      return [];
+
+      // fallback: convert plain text → comments
+      const lines = text.split("\n").filter((l) => l.trim());
+      return lines.slice(0, 8).map((line, i) => ({
+        file: "",
+        line: i + 1,
+        comment: line.trim(),
+      }));
     }
   }
 
-  // Map patch lines → real file lines
+  // Map patch lines → actual file lines
   function buildLineMap(patch) {
     const lines = patch.split("\n");
     let map = [];
@@ -109,20 +142,19 @@ ${combinedPatch}
   let comments = [];
 
   try {
-    const result = await model.generateContent(prompt);
-    const text = result.response.text();
+    const text = await callGeminiWithRetry(model, prompt);
     const parsed = parseJSON(text);
 
     for (const file of reviewFiles) {
       const lineMap = buildLineMap(file.patch);
 
       for (const c of parsed) {
-        if (!c.file || !c.line || !c.comment) continue;
+        if (!c.comment) continue;
 
-        if (!file.filename.includes(c.file)) continue;
+        // relaxed file matching
+        if (c.file && !file.filename.endsWith(c.file)) continue;
 
-        const realLine = lineMap[c.line - 1];
-        if (!realLine) continue;
+        const realLine = lineMap[(c.line || 1) - 1] || 1;
 
         comments.push({
           path: file.filename,
@@ -142,7 +174,7 @@ ${combinedPatch}
     return;
   }
 
-  //  Deduplicate comments (by file + message)
+  // Deduplicate
   const seen = new Set();
   comments = comments.filter((c) => {
     const key = `${c.path}:${c.body}`;
@@ -151,7 +183,7 @@ ${combinedPatch}
     return true;
   });
 
-  // GitHub limit: 30 comments per request
+  // GitHub API limit
   const chunkSize = 30;
 
   for (let i = 0; i < comments.length; i += chunkSize) {
