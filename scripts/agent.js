@@ -110,7 +110,7 @@ ${promptPatch}
 
   let aiText;
   try {
-    aiText = await callGemini(genAI, prompt);
+    aiText = await callAI(prompt, genAI);
   } catch (e) {
     console.error("AI request failed:", e?.message || e);
     return;
@@ -322,24 +322,87 @@ function parsePatchWithAbsoluteLines(patch) {
   return { lines: parsedLines, byPatchLine };
 }
 
-async function callGemini(genAI, prompt) {
-  const models = ["gemini-2.5-flash","gemini-2.0-flash","gemini-2.5-flash-lite"];
+async function callAI(prompt, genAI) {
+  try {
+    return await tryGemini("gemini-2.5-flash", prompt, genAI);
+  } catch (e) {
+    console.log("Flash failed, trying 2.0...");
+  }
 
-  for (const modelName of models) {
+  try {
+    return await tryGemini("gemini-2.0-flash", prompt, genAI);
+  } catch (e) {
+    console.log("2.0 Flash failed, trying DeepSeek...");
+  }
+
+  try {
+    return await callOpenRouter(prompt);
+  } catch (e) {
+    console.log("DeepSeek failed, falling back to Lite...");
+  }
+
+  return await tryGemini("gemini-2.5-flash-lite", prompt, genAI);
+}
+
+async function tryGemini(modelName, prompt, genAI) {
+  const retries = 3;
+
+  for (let i = 0; i < retries; i++) {
     try {
-      console.log(`Trying model: ${modelName}`);
+      console.log(`Trying ${modelName} attempt ${i + 1}`);
+
       const model = genAI.getGenerativeModel({ model: modelName });
       const res = await model.generateContent(prompt);
       const text = res?.response?.text?.();
+
       if (text && text.trim()) return text;
+
     } catch (e) {
       const msg = String(e?.message || "");
-      if (msg.includes("429") || msg.includes("503")) continue;
+
+      if (msg.includes("429")) {
+        const delay = Math.pow(2, i) * 2000;
+        console.log(`429 on ${modelName}, waiting ${delay}ms`);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+
       throw e;
     }
   }
 
-  throw new Error("All Gemini models failed");
+  throw new Error(`${modelName} failed`);
+}
+
+async function callOpenRouter(prompt) {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+
+  if (!apiKey) throw new Error("Missing OPENROUTER_API_KEY");
+
+  console.log("Trying OpenRouter DeepSeek");
+
+  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${apiKey}`,
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify({
+      model: "deepseek/deepseek-coder",
+      messages: [
+        { role: "system", content: "You are a strict code reviewer. Return ONLY JSON." },
+        { role: "user", content: prompt }
+      ],
+      temperature: 0.2
+    })
+  });
+
+  const data = await res.json();
+  const text = data?.choices?.[0]?.message?.content;
+
+  if (!text) throw new Error("OpenRouter returned empty response");
+
+  return text;
 }
 
 function parseJSON(text) {
