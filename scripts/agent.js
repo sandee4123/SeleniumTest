@@ -389,7 +389,7 @@ async function callOpenRouter(prompt) {
       "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      model: "deepseek/deepseek-coder",
+      model: "qwen/qwen3-coder:free",
       messages: [
         { role: "system", content: "You are a strict code reviewer. Return ONLY JSON." },
         { role: "user", content: prompt }
