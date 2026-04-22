@@ -374,48 +374,53 @@ async function tryGemini(modelName, prompt, genAI) {
   throw new Error(`${modelName} failed`);
 }
 
+// ONLY CHANGE: OpenRouter models fallback
 async function callOpenRouter(prompt) {
   const apiKey = process.env.OPENROUTER_API_KEY;
 
   if (!apiKey) throw new Error("Missing OPENROUTER_API_KEY");
 
-  console.log("Trying OpenRouter DeepSeek");
+  console.log("Trying OpenRouter models");
   console.log("OpenRouter key exists:", !!apiKey);
 
-  const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
-    },
-    body: JSON.stringify({
-      model: "qwen/qwen3-coder:free",
-      messages: [
-        { role: "system", content: "You are a strict code reviewer. Return ONLY JSON." },
-        { role: "user", content: prompt }
-      ],
-      temperature: 0.2
-    })
-  });
+  const models = [
+    "qwen/qwen3-coder:free",
+    "deepseek/deepseek-chat",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "nvidia/nemotron-3-super-120b-a12b:free"
+  ];
 
-  const data = await res.json();
+  for (const model of models) {
+    try {
+      console.log("Trying OpenRouter model:", model);
 
-  console.log("OpenRouter status:", res.status);
-  console.log("OpenRouter raw response:", JSON.stringify(data));
+      const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: "You are a strict code reviewer. Return ONLY JSON." },
+            { role: "user", content: prompt }
+          ],
+          temperature: 0.2
+        })
+      });
 
-  const text = data?.choices?.[0]?.message?.content;
+      const data = await res.json();
 
-  if (!res.ok) {
-    console.error("OpenRouter error response:", data);
-    throw new Error("OpenRouter request failed");
+      if (!res.ok) continue;
+
+      const text = data?.choices?.[0]?.message?.content;
+      if (text) return text;
+
+    } catch (e) {}
   }
 
-  if (!text) {
-    console.error("OpenRouter empty response:", data);
-    throw new Error("OpenRouter returned empty response");
-  }
-
-  return text;
+  throw new Error("All OpenRouter models failed");
 }
 
 function parseJSON(text) {
