@@ -18,11 +18,48 @@ jobs:
     steps:
       - name: Checkout repo
         uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
-      - name: Create PR if not exists
+      - name: Show branch info
+        run: |
+          echo "ref_name=${{ github.ref_name }}"
+          echo "ref=${{ github.ref }}"
+
+      - name: Check for open PR
+        id: prcheck
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
+          set -euo pipefail
+
+          BRANCH="${{ github.ref_name }}"
+          BASE="main"
+
+          echo "Checking open PRs for branch: $BRANCH -> $BASE"
+
+          PR_NUMBERS=$(gh pr list \
+            --head "$BRANCH" \
+            --base "$BASE" \
+            --state open \
+            --json number \
+            --jq '.[].number')
+
+          if [ -z "$PR_NUMBERS" ]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No open PR found"
+          else
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "Open PR(s): $PR_NUMBERS"
+          fi
+
+      - name: Create PR if not exists
+        if: steps.prcheck.outputs.found == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
           BRANCH="${{ github.ref_name }}"
           TITLE=$(git log -1 --pretty=%s)
 
@@ -30,15 +67,13 @@ jobs:
             TITLE="Auto PR: $BRANCH"
           fi
 
-          # ✅ Check ONLY for OPEN PRs (fixes your issue)
-          if gh pr list --head "$BRANCH" --state open --json number --jq 'length > 0'; then
-            echo "Open PR already exists for $BRANCH"
-            exit 0
-          fi
+          echo "Creating PR for branch: $BRANCH"
 
-          # 🚀 Create PR
           gh pr create \
             --title "$TITLE" \
             --body "Automated PR for branch $BRANCH" \
             --base main \
             --head "$BRANCH"
+
+      - name: Done
+        run: echo "Workflow complete"
