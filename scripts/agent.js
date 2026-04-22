@@ -3,86 +3,74 @@ const { GoogleGenerativeAI } = require("@google/generative-ai");
 async function run() {
   const token = process.env.GITHUB_TOKEN;
   const repo = process.env.GITHUB_REPOSITORY;
-  const ref = process.env.GITHUB_REF;
+  const ref = process.env.GITHUB_REF || "";
   const geminiKey = process.env.GEMINI_API_KEY;
 
-  if (!token || !repo || !ref || !geminiKey) {
-    console.error("Missing required env vars: GITHUB_TOKEN, GITHUB_REPOSITORY, GITHUB_REF, GEMINI_API_KEY");
-    return;
+  if (!token || !repo || !geminiKey) {
+    console.error("Missing required env vars: GITHUB_TOKEN, GITHUB_REPOSITORY, GEMINI_API_KEY");
+    process.exit(1);
   }
 
   const [owner, repoName] = repo.split("/");
   if (!owner || !repoName) {
-    console.error("Invalid GITHUB_REPOSITORY format (expected owner/repo)");
-    return;
+    console.error("Invalid GITHUB_REPOSITORY format. Expected owner/repo");
+    process.exit(1);
   }
 
   const prMatch = ref.match(/refs\/pull\/(\d+)\//);
   if (!prMatch) {
-    console.log("Not a pull_request ref, skipping");
+    console.log("Not a pull request ref. Exiting.");
     return;
   }
 
-  const pull_number = Number(prMatch[1]);
+  const pullNumber = Number(prMatch[1]);
 
   const ghHeaders = {
     Authorization: `Bearer ${token}`,
     Accept: "application/vnd.github+json",
   };
 
-  // ---- PR details ----
   const prRes = await fetch(
-    `https://api.github.com/repos/${owner}/${repoName}/pulls/${pull_number}`,
+    `https://api.github.com/repos/${owner}/${repoName}/pulls/${pullNumber}`,
     { headers: ghHeaders }
   );
+
   if (!prRes.ok) {
     console.error("Failed to fetch PR details:", await safeBody(prRes));
     return;
   }
 
   const prData = await prRes.json();
-  const commit_id = prData?.head?.sha;
-  if (!commit_id) {
+  const commitId = prData?.head?.sha;
+  if (!commitId) {
     console.error("Missing commit SHA in PR details");
     return;
   }
 
-  // ---- PR files ----
-  const filesRes = await fetch(
-    `https://api.github.com/repos/${owner}/${repoName}/pulls/${pull_number}/files?per_page=100`,
-    { headers: ghHeaders }
-  );
-  if (!filesRes.ok) {
-    console.error("Failed to fetch PR files:", await safeBody(filesRes));
+  const files = await fetchAllPrFiles(owner, repoName, pullNumber, ghHeaders);
+  if (!files.length) {
+    console.log("No files returned by GitHub API");
     return;
   }
-
-  const files = await filesRes.json();
 
   const reviewFiles = files.filter(
     (f) =>
       f.patch &&
+      f.status !== "removed" &&
       f.filename !== "scripts/agent.js" &&
       !f.filename.startsWith(".github/")
   );
 
   if (!reviewFiles.length) {
-    console.log("No relevant files");
+    console.log("No relevant patched files");
     return;
   }
 
-  // Build structured patch with absolute patch line numbers per file
-  const fileContexts = reviewFiles.map((f) => {
-    const parsed = parsePatchWithAbsoluteLines(f.patch);
-    return {
-      filename: f.filename,
-      patch: f.patch,
-      parsed,
-    };
-  });
+  const fileContexts = reviewFiles.map((f) => ({
+    filename: f.filename,
+    parsed: parsePatchWithAbsoluteLines(f.patch),
+  }));
 
-  // ---- Prompt payload with line anchors ----
-  // Each patch line is prefixed as [P<absolutePatchLine>]
   const promptPatch = fileContexts
     .map((fc) => {
       const rendered = fc.parsed.lines
@@ -91,26 +79,27 @@ async function run() {
       return `FILE: ${fc.filename}\n${rendered}`;
     })
     .join("\n\n")
-    .slice(0, 16000);
+    .slice(0, 18000);
 
   const prompt = `
 You are a strict senior code reviewer.
 
-Return ONLY JSON array:
+Return ONLY valid JSON array:
 [
   {
     "file": "exact/path/from_FILE_header",
     "patch_line": number,
-    "type": "issue_category",
+    "type": "bug|security|performance|style|maintainability|test",
     "comment": "short actionable issue"
   }
 ]
 
 Rules:
-- patch_line MUST be the numeric P-line from the provided patch (e.g. P37 -> 37).
-- Choose ONLY lines that begin with "+" (added lines).
-- Do NOT use removed lines ("-"), hunk headers ("@@"), or file metadata lines.
-- Only comment on visible code in this patch.
+- "file" must exactly match a FILE header path.
+- "patch_line" must be the numeric value from [P<number>] in that file block.
+- Select ONLY added code lines (those beginning with "+").
+- Do not use metadata lines, hunk headers, deleted lines, or context lines.
+- Only report issues visible in the provided patch.
 - No duplicates, no hallucinations, concise comments.
 
 Code:
@@ -118,59 +107,68 @@ ${promptPatch}
 `;
 
   const genAI = new GoogleGenerativeAI(geminiKey);
-  const aiText = await callGemini(genAI, prompt);
-  const parsed = parseJSON(aiText);
 
-  if (!Array.isArray(parsed) || parsed.length === 0) {
-    console.log("No issues found");
+  let aiText;
+  try {
+    aiText = await callGemini(genAI, prompt);
+  } catch (e) {
+    console.error("AI request failed:", e?.message || e);
     return;
   }
 
-  // Build strict comments: exact patch_line -> exact new-file line (RIGHT)
+  const aiIssues = parseJSON(aiText);
+  if (!Array.isArray(aiIssues) || aiIssues.length === 0) {
+    console.log("No issues found by AI");
+    return;
+  }
+
   let comments = [];
+  for (const issue of aiIssues) {
+    if (!issue || typeof issue !== "object") continue;
 
-  for (const item of parsed) {
-    if (!item || typeof item !== "object") continue;
-    if (!item.comment || typeof item.comment !== "string") continue;
+    const file = String(issue.file || "").trim();
+    const patchLine = Number(issue.patch_line);
+    const comment = String(issue.comment || "").trim();
 
-    const requestedFile = String(item.file || "").trim();
-    const requestedPatchLine = Number(item.patch_line);
+    if (!file || !Number.isInteger(patchLine) || patchLine <= 0 || !comment) continue;
 
-    if (!requestedFile || !Number.isInteger(requestedPatchLine) || requestedPatchLine <= 0) {
-      continue;
-    }
-
-    const fc = fileContexts.find((x) => x.filename === requestedFile);
+    const fc = fileContexts.find((x) => x.filename === file);
     if (!fc) continue;
 
-    const mapped = fc.parsed.byPatchLine.get(requestedPatchLine);
-    if (!mapped) continue;
+    const rec = fc.parsed.byPatchLine.get(patchLine);
+    if (!rec) continue;
 
-    // Strict: only allow added lines (+) so GitHub RIGHT-side single-line comment is precise
-    if (mapped.kind !== "add") continue;
-    if (!mapped.newLine || mapped.newLine <= 0) continue;
+    if (rec.kind !== "add") continue;
+    if (!Number.isInteger(rec.newLine) || rec.newLine <= 0) continue;
 
     comments.push({
       path: fc.filename,
-      line: mapped.newLine,
+      line: rec.newLine,
       side: "RIGHT",
-      body: item.comment.trim(),
-      _type: String(item.type || "general"),
-      _patchLine: requestedPatchLine,
+      body: `[AI Review]: ${comment}`,
     });
   }
 
-  // Dedup by path + line + body
   const seen = new Set();
   comments = comments.filter((c) => {
-    const key = `${c.path}:${c.line}:${c.body.toLowerCase()}`;
+    const key = `${c.path}:${c.line}:${normalizeText(c.body)}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
   });
 
+  const existing = await fetchExistingReviewComments(owner, repoName, pullNumber, ghHeaders);
+  const existingKeys = new Set(
+    existing.map((c) => `${c.path || c?.original_path || ""}:${c.line || c.original_line || ""}:${normalizeText(c.body)}`)
+  );
+
+  comments = comments.filter((c) => {
+    const key = `${c.path}:${c.line}:${normalizeText(c.body)}`;
+    return !existingKeys.has(key);
+  });
+
   if (!comments.length) {
-    console.log("No valid mappable comments");
+    console.log("No valid mappable comments after dedupe");
     return;
   }
 
@@ -186,7 +184,6 @@ ${promptPatch}
     body,
   }));
 
-  // Post in chunks
   const chunkSize = 30;
   let posted = 0;
 
@@ -194,12 +191,15 @@ ${promptPatch}
     const batch = payloadComments.slice(i, i + chunkSize);
 
     const res = await fetch(
-      `https://api.github.com/repos/${owner}/${repoName}/pulls/${pull_number}/reviews`,
+      `https://api.github.com/repos/${owner}/${repoName}/pulls/${pullNumber}/reviews`,
       {
         method: "POST",
-        headers: ghHeaders,
+        headers: {
+          ...ghHeaders,
+          "Content-Type": "application/json",
+        },
         body: JSON.stringify({
-          commit_id,
+          commit_id: commitId,
           event: "COMMENT",
           comments: batch,
         }),
@@ -218,19 +218,68 @@ ${promptPatch}
   console.log(`Posted ${posted} comments`);
 }
 
+async function fetchAllPrFiles(owner, repoName, pullNumber, headers) {
+  const all = [];
+  let page = 1;
+
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repoName}/pulls/${pullNumber}/files?per_page=100&page=${page}`,
+      { headers }
+    );
+
+    if (!res.ok) {
+      console.error("Failed to fetch PR files page", page, ":", await safeBody(res));
+      break;
+    }
+
+    const chunk = await res.json();
+    if (!Array.isArray(chunk) || chunk.length === 0) break;
+
+    all.push(...chunk);
+    if (chunk.length < 100) break;
+    page++;
+  }
+
+  return all;
+}
+
+async function fetchExistingReviewComments(owner, repoName, pullNumber, headers) {
+  const all = [];
+  let page = 1;
+
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repoName}/pulls/${pullNumber}/comments?per_page=100&page=${page}`,
+      { headers }
+    );
+
+    if (!res.ok) {
+      console.error("Failed to fetch existing review comments page", page, ":", await safeBody(res));
+      break;
+    }
+
+    const chunk = await res.json();
+    if (!Array.isArray(chunk) || chunk.length === 0) break;
+
+    all.push(...chunk);
+    if (chunk.length < 100) break;
+    page++;
+  }
+
+  return all;
+}
+
 function parsePatchWithAbsoluteLines(patch) {
   const lines = patch.split("\n");
   const byPatchLine = new Map();
-
   let oldLine = 0;
   let newLine = 0;
-
   const parsedLines = [];
 
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i];
     const patchLine = i + 1;
-
     let kind = "meta";
     let old = null;
     let neu = null;
@@ -249,13 +298,11 @@ function parsePatchWithAbsoluteLines(patch) {
       kind = "meta";
     } else if (raw.startsWith("+")) {
       kind = "add";
-      old = null;
       neu = newLine;
       newLine++;
     } else if (raw.startsWith("-")) {
       kind = "del";
       old = oldLine;
-      neu = null;
       oldLine++;
     } else {
       kind = "context";
@@ -265,14 +312,7 @@ function parsePatchWithAbsoluteLines(patch) {
       newLine++;
     }
 
-    const rec = {
-      patchLine,
-      raw,
-      kind,
-      oldLine: old,
-      newLine: neu,
-    };
-
+    const rec = { patchLine, raw, kind, oldLine: old, newLine: neu };
     parsedLines.push(rec);
     byPatchLine.set(patchLine, rec);
   }
@@ -283,10 +323,10 @@ function parsePatchWithAbsoluteLines(patch) {
 async function callGemini(genAI, prompt) {
   const models = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
 
-  for (const name of models) {
+  for (const modelName of models) {
     try {
-      console.log(`Trying model: ${name}`);
-      const model = genAI.getGenerativeModel({ model: name });
+      console.log(`Trying model: ${modelName}`);
+      const model = genAI.getGenerativeModel({ model: modelName });
       const res = await model.generateContent(prompt);
       const text = res?.response?.text?.();
       if (text && text.trim()) return text;
@@ -312,6 +352,10 @@ function parseJSON(text) {
       return [];
     }
   }
+}
+
+function normalizeText(text) {
+  return String(text || "").toLowerCase().replace(/\s+/g, " ").trim();
 }
 
 async function safeBody(res) {
