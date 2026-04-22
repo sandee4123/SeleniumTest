@@ -30,14 +30,15 @@ jobs:
             TITLE="Auto PR: $BRANCH"
           fi
 
-          # Check if PR already exists
-          if gh pr view "$BRANCH" >/dev/null 2>&1; then
-            echo "PR already exists for $BRANCH"
+          # ✅ Check ONLY for OPEN PRs (fixes your issue)
+          if gh pr list --head "$BRANCH" --state open --json number --jq 'length > 0'; then
+            echo "Open PR already exists for $BRANCH"
             exit 0
           fi
 
+          # 🚀 Create PR
           gh pr create \
             --title "$TITLE" \
-            --body "Auto PR for branch $BRANCH" \
+            --body "Automated PR for branch $BRANCH" \
             --base main \
             --head "$BRANCH"
