@@ -139,7 +139,6 @@ Be thorough, but avoid repeating the same issue multiple times.
 STRICT MODE:
 - Do NOT skip small issues
 - Do NOT combine multiple issues
-- Maximize findings aggressively
 Code:
 ${promptPatch}
 `;
