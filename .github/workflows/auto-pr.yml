@@ -1,0 +1,43 @@
+name: Auto PR
+
+on:
+  push:
+    branches:
+      - '**'
+      - '!main'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  create-pr:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+
+      - name: Create PR if not exists
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          BRANCH="${{ github.ref_name }}"
+          TITLE=$(git log -1 --pretty=%s)
+
+          if [ -z "$TITLE" ]; then
+            TITLE="Auto PR: $BRANCH"
+          fi
+
+          # Check if PR already exists
+          if gh pr view "$BRANCH" >/dev/null 2>&1; then
+            echo "PR already exists for $BRANCH"
+            exit 0
+          fi
+
+          gh pr create \
+            --title "$TITLE" \
+            --body "Auto PR for branch $BRANCH" \
+            --base main \
+            --head "$BRANCH"
