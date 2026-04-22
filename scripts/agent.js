@@ -440,8 +440,7 @@ async function callOpenRouter(prompt) {
         body: JSON.stringify({
           model,
           messages: [
-            { role: "system", content: "You are a strict code reviewer. Return ONLY JSON." },
-            { role: "user", content: prompt }
+            { role: "system", content: prompt }
           ],
           temperature: 0.2
         })
