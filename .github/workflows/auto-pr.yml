@@ -4,7 +4,7 @@ on:
   push:
     branches:
       - '**'
-      - '!main'
+      - '!master'
 
 permissions:
   contents: write
@@ -35,16 +35,19 @@ jobs:
           git branch --show-current
           git log --oneline -n 3
 
-      - name: Check if branch has commits ahead of main
+      - name: Check if branch has commits ahead of master
         id: ahead
         run: |
           set -euo pipefail
 
           BRANCH="${{ github.ref_name }}"
-          git fetch origin main
-          COUNT=$(git rev-list --count origin/main.."$BRANCH" || echo 0)
+          BASE="master"
 
-          echo "Commits ahead of main: $COUNT"
+          git fetch origin "$BASE"
+
+          COUNT=$(git rev-list --count "origin/$BASE..$BRANCH" || echo 0)
+
+          echo "Commits ahead of $BASE: $COUNT"
 
           if [ "$COUNT" -gt 0 ]; then
             echo "has_commits=true" >> "$GITHUB_OUTPUT"
@@ -61,9 +64,10 @@ jobs:
           set -euo pipefail
 
           BRANCH="${{ github.ref_name }}"
-          BASE="main"
+          BASE="master"
 
           PR_NUMBERS=$(gh pr list \
+            --repo "${{ github.repository }}" \
             --head "$BRANCH" \
             --base "$BASE" \
             --state open \
@@ -98,7 +102,7 @@ jobs:
             --repo "${{ github.repository }}" \
             --title "$TITLE" \
             --body "Automated PR for branch $BRANCH" \
-            --base main \
+            --base master \
             --head "$BRANCH"
 
       - name: Done
