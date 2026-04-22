@@ -1,13 +1,10 @@
-const { GoogleGenerativeAI } = require("@google/generative-ai");
-
 async function run() {
   const token = process.env.GITHUB_TOKEN;
   const repo = process.env.GITHUB_REPOSITORY;
   const ref = process.env.GITHUB_REF || "";
-  const geminiKey = process.env.GEMINI_API_KEY;
 
-  if (!token || !repo || !geminiKey) {
-    console.error("Missing required env vars: GITHUB_TOKEN, GITHUB_REPOSITORY, GEMINI_API_KEY");
+  if (!token || !repo) {
+    console.error("Missing required env vars: GITHUB_TOKEN, GITHUB_REPOSITORY");
     process.exit(1);
   }
 
@@ -81,7 +78,7 @@ async function run() {
     .join("\n\n")
     .slice(0, 18000);
 
-const prompt = `
+  const prompt = `
 You are a strict senior code reviewer focused on correctness, maintainability, and test automation best practices.
 
 Return ONLY valid JSON array:
@@ -108,37 +105,13 @@ Review priorities (highest to lower):
 3) Maintainability and readability
 4) Test automation best practices
 
-Code quality checks to enforce:
-- Naming conventions:
-  - Class names should be clear PascalCase nouns (avoid vague/misspelled/abbreviated names).
-  - Method names should be clear lowerCamelCase verbs.
-  - Variable names should be descriptive lowerCamelCase; avoid single-letter names except very small loop indices.
-  - Flag unclear, inconsistent, misspelled, or non-intent-revealing names.
-- Readability:
-  - Flag magic values where a named constant would improve clarity.
-  - Flag long/complex inline expressions that hurt readability.
-- Selenium locator best practice:
-  - Locators should be stored in variables/constants (e.g., By fields/constants), not embedded inline in interaction calls.
-  - Flag patterns like driver.findElement(By.xpath("...")).click() or waits with inline By if locator constants/variables are not used.
-  - Prefer reusable locator definitions to improve maintainability.
-- Consistency:
-  - Flag mixed naming styles within the same file or related symbols.
-
-Comment style requirements:
-- Be specific: mention what is wrong and the expected better pattern.
-- Keep each comment one issue only.
-- Keep comments short and actionable.
-- Do not suggest changes outside visible patch lines.
-
 Code:
 ${promptPatch}
 `;
 
-  const genAI = new GoogleGenerativeAI(geminiKey);
-
   let aiText;
   try {
-    aiText = await callGemini(genAI, prompt);
+    aiText = await callGitHubModel(prompt, token);
   } catch (e) {
     console.error("AI request failed:", e?.message || e);
     return;
@@ -246,118 +219,34 @@ ${promptPatch}
   console.log(`Posted ${posted} comments`);
 }
 
-async function fetchAllPrFiles(owner, repoName, pullNumber, headers) {
-  const all = [];
-  let page = 1;
+async function callGitHubModel(prompt, token) {
+  const models = ["gpt-4o-mini", "gpt-4o"];
 
-  while (true) {
-    const res = await fetch(
-      `https://api.github.com/repos/${owner}/${repoName}/pulls/${pullNumber}/files?per_page=100&page=${page}`,
-      { headers }
-    );
-
-    if (!res.ok) {
-      console.error("Failed to fetch PR files page", page, ":", await safeBody(res));
-      break;
-    }
-
-    const chunk = await res.json();
-    if (!Array.isArray(chunk) || chunk.length === 0) break;
-
-    all.push(...chunk);
-    if (chunk.length < 100) break;
-    page++;
-  }
-
-  return all;
-}
-
-async function fetchExistingReviewComments(owner, repoName, pullNumber, headers) {
-  const all = [];
-  let page = 1;
-
-  while (true) {
-    const res = await fetch(
-      `https://api.github.com/repos/${owner}/${repoName}/pulls/${pullNumber}/comments?per_page=100&page=${page}`,
-      { headers }
-    );
-
-    if (!res.ok) {
-      console.error("Failed to fetch existing review comments page", page, ":", await safeBody(res));
-      break;
-    }
-
-    const chunk = await res.json();
-    if (!Array.isArray(chunk) || chunk.length === 0) break;
-
-    all.push(...chunk);
-    if (chunk.length < 100) break;
-    page++;
-  }
-
-  return all;
-}
-
-function parsePatchWithAbsoluteLines(patch) {
-  const lines = patch.split("\n");
-  const byPatchLine = new Map();
-  let oldLine = 0;
-  let newLine = 0;
-  const parsedLines = [];
-
-  for (let i = 0; i < lines.length; i++) {
-    const raw = lines[i];
-    const patchLine = i + 1;
-    let kind = "meta";
-    let old = null;
-    let neu = null;
-
-    const hunk = raw.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
-    if (hunk) {
-      oldLine = Number(hunk[1]);
-      newLine = Number(hunk[2]);
-      kind = "hunk";
-    } else if (
-      raw.startsWith("diff --git") ||
-      raw.startsWith("index ") ||
-      raw.startsWith("--- ") ||
-      raw.startsWith("+++ ")
-    ) {
-      kind = "meta";
-    } else if (raw.startsWith("+")) {
-      kind = "add";
-      neu = newLine;
-      newLine++;
-    } else if (raw.startsWith("-")) {
-      kind = "del";
-      old = oldLine;
-      oldLine++;
-    } else {
-      kind = "context";
-      old = oldLine;
-      neu = newLine;
-      oldLine++;
-      newLine++;
-    }
-
-    const rec = { patchLine, raw, kind, oldLine: old, newLine: neu };
-    parsedLines.push(rec);
-    byPatchLine.set(patchLine, rec);
-  }
-
-  return { lines: parsedLines, byPatchLine };
-}
-
-async function callGemini(genAI, prompt) {
-  const models = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
-
-  for (const modelName of models) {
+  for (const model of models) {
     try {
-      console.log(`Trying model: ${modelName}`);
-      const model = genAI.getGenerativeModel({ model: modelName });
-      const res = await model.generateContent(prompt);
-      const text = res?.response?.text?.();
+      console.log(`Trying model: ${model}`);
+
+      const res = await fetch("https://models.inference.ai.azure.com/chat/completions", {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Bearer ${token}`
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: "You are a strict code reviewer." },
+            { role: "user", content: prompt }
+          ],
+          temperature: 0.2
+        })
+      });
+
+      const data = await res.json();
+      const text = data?.choices?.[0]?.message?.content;
+
       if (text && text.trim()) return text;
+
     } catch (e) {
       const msg = String(e?.message || "");
       if (msg.includes("429") || msg.includes("503")) continue;
@@ -365,40 +254,5 @@ async function callGemini(genAI, prompt) {
     }
   }
 
-  throw new Error("All Gemini models failed");
+  throw new Error("All GitHub models failed");
 }
-
-function parseJSON(text) {
-  try {
-    return JSON.parse(text);
-  } catch {
-    const m = text.match(/\[[\s\S]*\]/);
-    if (!m) return [];
-    try {
-      return JSON.parse(m[0]);
-    } catch {
-      return [];
-    }
-  }
-}
-
-function normalizeText(text) {
-  return String(text || "").toLowerCase().replace(/\s+/g, " ").trim();
-}
-
-async function safeBody(res) {
-  try {
-    return await res.json();
-  } catch {
-    try {
-      return await res.text();
-    } catch {
-      return "unreadable response";
-    }
-  }
-}
-
-run().catch((e) => {
-  console.error("FATAL:", e?.message || e);
-  process.exit(1);
-});
