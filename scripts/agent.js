@@ -235,7 +235,10 @@ async function callGitHubModel(prompt, token) {
         body: JSON.stringify({
           model,
           messages: [
-            { role: "system", content: "You are a strict code reviewer." },
+            {
+              role: "system",
+              content: "You MUST return ONLY valid JSON array. No text, no explanation, no markdown."
+            },
             { role: "user", content: prompt }
           ],
           temperature: 0.2
@@ -243,9 +246,17 @@ async function callGitHubModel(prompt, token) {
       });
 
       const data = await res.json();
-      const text = data?.choices?.[0]?.message?.content;
 
-      if (text && text.trim()) return text;
+      let text = data?.choices?.[0]?.message?.content;
+      if (!text) continue;
+
+      text = text.replace(/```json|```/g, "").trim();
+
+      if (text && text.trim()) {
+        console.log(`Model used: ${model}`);
+        console.log("RAW AI RESPONSE:\n", text);
+        return text;
+      }
 
     } catch (e) {
       const msg = String(e?.message || "");
@@ -256,3 +267,38 @@ async function callGitHubModel(prompt, token) {
 
   throw new Error("All GitHub models failed");
 }
+
+function parseJSON(text) {
+  try {
+    return JSON.parse(text);
+  } catch {
+    const m = text.match(/\[[\s\S]*\]/);
+    if (!m) return [];
+    try {
+      return JSON.parse(m[0]);
+    } catch {
+      return [];
+    }
+  }
+}
+
+function normalizeText(text) {
+  return String(text || "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
+async function safeBody(res) {
+  try {
+    return await res.json();
+  } catch {
+    try {
+      return await res.text();
+    } catch {
+      return "unreadable response";
+    }
+  }
+}
+
+run().catch((e) => {
+  console.error("FATAL:", e?.message || e);
+  process.exit(1);
+});
