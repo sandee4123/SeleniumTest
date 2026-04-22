@@ -26,12 +26,12 @@ async function run() {
   const pullNumber = Number(prMatch[1]);
 
   const ghHeaders = {
-    Authorization: Bearer ${token},
+    Authorization: `Bearer ${token}`,
     Accept: "application/vnd.github+json",
   };
 
   const prRes = await fetch(
-    https://api.github.com/repos/${owner}/${repoName}/pulls/${pullNumber},
+    `https://api.github.com/repos/${owner}/${repoName}/pulls/${pullNumber}`,
     { headers: ghHeaders }
   );
 
@@ -74,14 +74,14 @@ async function run() {
   const promptPatch = fileContexts
     .map((fc) => {
       const rendered = fc.parsed.lines
-        .map((l) => [P${l.patchLine}] ${l.raw})
+        .map((l) => `[P${l.patchLine}] ${l.raw}`)
         .join("\n");
-      return FILE: ${fc.filename}\n${rendered};
+      return `FILE: ${fc.filename}\n${rendered}`;
     })
     .join("\n\n")
     .slice(0, 18000);
 
-const prompt = `
+  const prompt = `
 You are a strict senior code reviewer focused on correctness, maintainability, and test automation best practices.
 
 Return ONLY valid JSON array:
@@ -101,34 +101,6 @@ Rules:
 - Do NOT use metadata lines, hunk headers, deleted lines, or context lines.
 - Only report issues visible in the provided patch.
 - No duplicates, no hallucinations, concise comments.
-
-Review priorities (highest to lower):
-1) Correctness / bugs
-2) Security and reliability risks
-3) Maintainability and readability
-4) Test automation best practices
-
-Code quality checks to enforce:
-- Naming conventions:
-  - Class names should be clear PascalCase nouns (avoid vague/misspelled/abbreviated names).
-  - Method names should be clear lowerCamelCase verbs.
-  - Variable names should be descriptive lowerCamelCase; avoid single-letter names except very small loop indices.
-  - Flag unclear, inconsistent, misspelled, or non-intent-revealing names.
-- Readability:
-  - Flag magic values where a named constant would improve clarity.
-  - Flag long/complex inline expressions that hurt readability.
-- Selenium locator best practice:
-  - Locators should be stored in variables/constants (e.g., By fields/constants), not embedded inline in interaction calls.
-  - Flag patterns like driver.findElement(By.xpath("...")).click() or waits with inline By if locator constants/variables are not used.
-  - Prefer reusable locator definitions to improve maintainability.
-- Consistency:
-  - Flag mixed naming styles within the same file or related symbols.
-
-Comment style requirements:
-- Be specific: mention what is wrong and the expected better pattern.
-- Keep each comment one issue only.
-- Keep comments short and actionable.
-- Do not suggest changes outside visible patch lines.
 
 Code:
 ${promptPatch}
@@ -173,13 +145,13 @@ ${promptPatch}
       path: fc.filename,
       line: rec.newLine,
       side: "RIGHT",
-      body: [AI Review]: ${comment},
+      body: `[AI Review]: ${comment}`,
     });
   }
 
   const seen = new Set();
   comments = comments.filter((c) => {
-    const key = ${c.path}:${c.line}:${normalizeText(c.body)};
+    const key = `${c.path}:${c.line}:${normalizeText(c.body)}`;
     if (seen.has(key)) return false;
     seen.add(key);
     return true;
@@ -187,11 +159,13 @@ ${promptPatch}
 
   const existing = await fetchExistingReviewComments(owner, repoName, pullNumber, ghHeaders);
   const existingKeys = new Set(
-    existing.map((c) => ${c.path || c?.original_path || ""}:${c.line || c.original_line || ""}:${normalizeText(c.body)})
+    existing.map((c) =>
+      `${c.path || c?.original_path || ""}:${c.line || c.original_line || ""}:${normalizeText(c.body)}`
+    )
   );
 
   comments = comments.filter((c) => {
-    const key = ${c.path}:${c.line}:${normalizeText(c.body)};
+    const key = `${c.path}:${c.line}:${normalizeText(c.body)}`;
     return !existingKeys.has(key);
   });
 
@@ -219,7 +193,7 @@ ${promptPatch}
     const batch = payloadComments.slice(i, i + chunkSize);
 
     const res = await fetch(
-      https://api.github.com/repos/${owner}/${repoName}/pulls/${pullNumber}/reviews,
+      `https://api.github.com/repos/${owner}/${repoName}/pulls/${pullNumber}/reviews`,
       {
         method: "POST",
         headers: {
@@ -243,7 +217,7 @@ ${promptPatch}
     posted += batch.length;
   }
 
-  console.log(Posted ${posted} comments);
+  console.log(`Posted ${posted} comments`);
 }
 
 async function fetchAllPrFiles(owner, repoName, pullNumber, headers) {
@@ -252,7 +226,7 @@ async function fetchAllPrFiles(owner, repoName, pullNumber, headers) {
 
   while (true) {
     const res = await fetch(
-      https://api.github.com/repos/${owner}/${repoName}/pulls/${pullNumber}/files?per_page=100&page=${page},
+      `https://api.github.com/repos/${owner}/${repoName}/pulls/${pullNumber}/files?per_page=100&page=${page}`,
       { headers }
     );
 
@@ -278,7 +252,7 @@ async function fetchExistingReviewComments(owner, repoName, pullNumber, headers)
 
   while (true) {
     const res = await fetch(
-      https://api.github.com/repos/${owner}/${repoName}/pulls/${pullNumber}/comments?per_page=100&page=${page},
+      `https://api.github.com/repos/${owner}/${repoName}/pulls/${pullNumber}/comments?per_page=100&page=${page}`,
       { headers }
     );
 
@@ -353,7 +327,7 @@ async function callGemini(genAI, prompt) {
 
   for (const modelName of models) {
     try {
-      console.log(Trying model: ${modelName});
+      console.log(`Trying model: ${modelName}`);
       const model = genAI.getGenerativeModel({ model: modelName });
       const res = await model.generateContent(prompt);
       const text = res?.response?.text?.();
