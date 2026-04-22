@@ -101,40 +101,41 @@ Rules:
 - Do NOT use metadata lines, hunk headers, deleted lines, or context lines.
 - Only report issues visible in the provided patch.
 - No duplicates, no hallucinations, concise comments.
-MANDATORY CHECKLIST (DO NOT SKIP ANY):
-1) BUGS
-- Null risks, incorrect conditions, broken logic
-- Misuse of APIs
-2) SECURITY
-- Hardcoded credentials (username, password, tokens, card data)
-- Sensitive data exposure
-3) SELENIUM (VERY STRICT)
-- Inline locators like driver.findElement(By.xpath(...)) MUST be flagged
-- Locators MUST be stored as reusable By constants
-- Absolute XPath (/html/body/...) MUST be flagged
-- Generic XPath (//button, //div, etc.) MUST be flagged
-- CSS nth-child selectors MUST be flagged
-- Thread.sleep() MUST ALWAYS be flagged
-- Missing waits (WebDriverWait) MUST be flagged
-- driver.getPageSource().contains MUST be flagged
-- Non-deterministic flows MUST be flagged
-4) MAINTAINABILITY
-- Magic values MUST be flagged
-- Hardcoded paths MUST be flagged
-- Static mutable variables MUST be flagged
-- Repeated logic MUST be flagged
-5) TEST DESIGN
-- Missing setup/teardown MUST be flagged
-- driver.quit() not handled MUST be flagged
-- Improper driver lifecycle MUST be flagged
-6) NAMING (STRICT)
-- Class names must be clear PascalCase nouns
-- Method names must be descriptive lowerCamelCase verbs
-- Variable names must be meaningful (NO single-letter names except loop indices)
-- Flag unclear, abbreviated, or inconsistent naming
-7) READABILITY
-- Long/complex inline expressions MUST be flagged
-- Poor readability MUST be flagged
+Review everything carefully and dont skip any category.
+
+Bugs:
+Check for null issues, wrong conditions, broken logic, or incorrect API usage.
+
+Security:
+Look for hardcoded credentials (usernames, passwords, tokens, card data) and any exposure of sensitive information.
+
+Selenium practices:
+Avoid inline locators inside actions; locators should be reusable.
+Flag absolute XPath and overly generic XPath (like //button or //div).
+Flag brittle selectors such as nth-child.
+Avoid Thread.sleep; proper waits should be used instead.
+Flag missing waits, pageSource-based validations, and any non-deterministic behavior.
+
+Maintainability:
+Avoid magic values; use constants.
+Flag hardcoded paths and mutable static variables.
+Identify repeated logic that should be reused.
+
+Test design:
+Check for proper setup and teardown.
+Ensure driver lifecycle is handled correctly (including quit).
+Flag weak or incomplete test structure.
+
+Naming:
+Names should clearly describe purpose.
+Avoid vague, abbreviated, or inconsistent naming.
+Use standard naming conventions for classes, methods, and variables.
+
+Readability:
+Flag complex or hard-to-read expressions.
+Highlight anything that makes the code harder to understand.
+Be thorough, but avoid repeating the same issue multiple times.
+
 STRICT MODE:
 - Do NOT skip small issues
 - Do NOT combine multiple issues
