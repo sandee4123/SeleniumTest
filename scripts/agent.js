@@ -380,6 +380,7 @@ async function callOpenRouter(prompt) {
   if (!apiKey) throw new Error("Missing OPENROUTER_API_KEY");
 
   console.log("Trying OpenRouter DeepSeek");
+  console.log("OpenRouter key exists:", !!apiKey);
 
   const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
     method: "POST",
@@ -398,9 +399,21 @@ async function callOpenRouter(prompt) {
   });
 
   const data = await res.json();
+
+  console.log("OpenRouter status:", res.status);
+  console.log("OpenRouter raw response:", JSON.stringify(data));
+
   const text = data?.choices?.[0]?.message?.content;
 
-  if (!text) throw new Error("OpenRouter returned empty response");
+  if (!res.ok) {
+    console.error("OpenRouter error response:", data);
+    throw new Error("OpenRouter request failed");
+  }
+
+  if (!text) {
+    console.error("OpenRouter empty response:", data);
+    throw new Error("OpenRouter returned empty response");
+  }
 
   return text;
 }
