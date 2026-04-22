@@ -79,9 +79,8 @@ async function run() {
     .slice(0, 18000);
 
   const prompt = `
-You are a strict senior code reviewer focused on correctness, maintainability, and test automation best practices.
+You MUST return ONLY valid JSON array. No text, no explanation.
 
-Return ONLY valid JSON array:
 [
   {
     "file": "exact/path/from_FILE_header",
@@ -90,20 +89,6 @@ Return ONLY valid JSON array:
     "comment": "short actionable issue"
   }
 ]
-
-Rules:
-- "file" must exactly match a FILE header path.
-- "patch_line" must be the numeric value from [P<number>] in that file block.
-- Select ONLY added code lines (those beginning with "+").
-- Do NOT use metadata lines, hunk headers, deleted lines, or context lines.
-- Only report issues visible in the provided patch.
-- No duplicates, no hallucinations, concise comments.
-
-Review priorities (highest to lower):
-1) Correctness / bugs
-2) Security and reliability risks
-3) Maintainability and readability
-4) Test automation best practices
 
 Code:
 ${promptPatch}
@@ -125,98 +110,47 @@ ${promptPatch}
 
   let comments = [];
   for (const issue of aiIssues) {
-    if (!issue || typeof issue !== "object") continue;
-
-    const file = String(issue.file || "").trim();
-    const patchLine = Number(issue.patch_line);
-    const comment = String(issue.comment || "").trim();
-
-    if (!file || !Number.isInteger(patchLine) || patchLine <= 0 || !comment) continue;
-
-    const fc = fileContexts.find((x) => x.filename === file);
+    const fc = fileContexts.find((x) => x.filename === issue.file);
     if (!fc) continue;
 
-    const rec = fc.parsed.byPatchLine.get(patchLine);
-    if (!rec) continue;
-
-    if (rec.kind !== "add") continue;
-    if (!Number.isInteger(rec.newLine) || rec.newLine <= 0) continue;
+    const rec = fc.parsed.byPatchLine.get(issue.patch_line);
+    if (!rec || rec.kind !== "add") continue;
 
     comments.push({
       path: fc.filename,
       line: rec.newLine,
       side: "RIGHT",
-      body: `[AI Review]: ${comment}`,
+      body: `[AI Review]: ${issue.comment}`,
     });
   }
 
-  const seen = new Set();
-  comments = comments.filter((c) => {
-    const key = `${c.path}:${c.line}:${normalizeText(c.body)}`;
-    if (seen.has(key)) return false;
-    seen.add(key);
-    return true;
-  });
-
-  const existing = await fetchExistingReviewComments(owner, repoName, pullNumber, ghHeaders);
-  const existingKeys = new Set(
-    existing.map((c) => `${c.path || c?.original_path || ""}:${c.line || c.original_line || ""}:${normalizeText(c.body)}`)
-  );
-
-  comments = comments.filter((c) => {
-    const key = `${c.path}:${c.line}:${normalizeText(c.body)}`;
-    return !existingKeys.has(key);
-  });
-
   if (!comments.length) {
-    console.log("No valid mappable comments after dedupe");
+    console.log("No valid mappable comments");
     return;
   }
 
-  comments.sort((a, b) => {
-    if (a.path === b.path) return a.line - b.line;
-    return a.path.localeCompare(b.path);
-  });
-
-  const payloadComments = comments.map(({ path, line, side, body }) => ({
-    path,
-    line,
-    side,
-    body,
-  }));
-
-  const chunkSize = 30;
-  let posted = 0;
-
-  for (let i = 0; i < payloadComments.length; i += chunkSize) {
-    const batch = payloadComments.slice(i, i + chunkSize);
-
-    const res = await fetch(
-      `https://api.github.com/repos/${owner}/${repoName}/pulls/${pullNumber}/reviews`,
-      {
-        method: "POST",
-        headers: {
-          ...ghHeaders,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          commit_id: commitId,
-          event: "COMMENT",
-          comments: batch,
-        }),
-      }
-    );
-
-    const body = await safeBody(res);
-    if (!res.ok) {
-      console.error("GitHub API error:", body);
-      continue;
+  const res = await fetch(
+    `https://api.github.com/repos/${owner}/${repoName}/pulls/${pullNumber}/reviews`,
+    {
+      method: "POST",
+      headers: {
+        ...ghHeaders,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        commit_id: commitId,
+        event: "COMMENT",
+        comments,
+      }),
     }
+  );
 
-    posted += batch.length;
+  if (!res.ok) {
+    console.error("GitHub API error:", await safeBody(res));
+    return;
   }
 
-  console.log(`Posted ${posted} comments`);
+  console.log(`Posted ${comments.length} comments`);
 }
 
 async function callGitHubModel(prompt, token) {
@@ -224,81 +158,97 @@ async function callGitHubModel(prompt, token) {
 
   for (const model of models) {
     try {
-      console.log(`Trying model: ${model}`);
+      console.log("Trying:", model);
 
       const res = await fetch("https://models.inference.ai.azure.com/chat/completions", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
-          "Authorization": `Bearer ${token}`
+          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
           model,
           messages: [
-            {
-              role: "system",
-              content: "You MUST return ONLY valid JSON array. No text, no explanation, no markdown."
-            },
-            { role: "user", content: prompt }
+            { role: "system", content: "Return ONLY JSON array." },
+            { role: "user", content: prompt },
           ],
-          temperature: 0.2
-        })
+          temperature: 0.2,
+        }),
       });
 
       const data = await res.json();
-
       let text = data?.choices?.[0]?.message?.content;
+
       if (!text) continue;
 
       text = text.replace(/```json|```/g, "").trim();
 
-      if (text && text.trim()) {
-        console.log(`Model used: ${model}`);
-        console.log("RAW AI RESPONSE:\n", text);
-        return text;
-      }
+      console.log("Model used:", model);
+      console.log("RAW:", text);
 
+      return text;
     } catch (e) {
-      const msg = String(e?.message || "");
-      if (msg.includes("429") || msg.includes("503")) continue;
-      throw e;
+      continue;
     }
   }
 
-  throw new Error("All GitHub models failed");
+  throw new Error("All models failed");
+}
+
+async function fetchAllPrFiles(owner, repoName, pullNumber, headers) {
+  const res = await fetch(
+    `https://api.github.com/repos/${owner}/${repoName}/pulls/${pullNumber}/files`,
+    { headers }
+  );
+  return await res.json();
+}
+
+function parsePatchWithAbsoluteLines(patch) {
+  const lines = patch.split("\n");
+  const byPatchLine = new Map();
+  let newLine = 0;
+
+  for (let i = 0; i < lines.length; i++) {
+    const raw = lines[i];
+    const patchLine = i + 1;
+
+    if (raw.startsWith("@@")) {
+      const match = raw.match(/\+(\d+)/);
+      if (match) newLine = Number(match[1]);
+    } else if (raw.startsWith("+")) {
+      byPatchLine.set(patchLine, { kind: "add", newLine });
+      newLine++;
+    } else if (!raw.startsWith("-")) {
+      newLine++;
+    }
+  }
+
+  return { byPatchLine };
 }
 
 function parseJSON(text) {
   try {
     return JSON.parse(text);
   } catch {
-    const m = text.match(/\[[\s\S]*\]/);
-    if (!m) return [];
+    const match = text.match(/\[[\s\S]*\]/);
+    if (!match) return [];
     try {
-      return JSON.parse(m[0]);
+      return JSON.parse(match[0]);
     } catch {
       return [];
     }
   }
 }
 
-function normalizeText(text) {
-  return String(text || "").toLowerCase().replace(/\s+/g, " ").trim();
-}
-
 async function safeBody(res) {
   try {
     return await res.json();
   } catch {
-    try {
-      return await res.text();
-    } catch {
-      return "unreadable response";
-    }
+    return await res.text();
   }
 }
 
 run().catch((e) => {
-  console.error("FATAL:", e?.message || e);
+  console.error("FATAL:", e);
   process.exit(1);
 });
