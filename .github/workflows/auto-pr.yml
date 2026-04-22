@@ -21,13 +21,40 @@ jobs:
         with:
           fetch-depth: 0
 
-      - name: Show branch info
+      - name: Set up Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Show branch and commit info
         run: |
           echo "ref_name=${{ github.ref_name }}"
           echo "ref=${{ github.ref }}"
+          echo "sha=${{ github.sha }}"
+          git status
+          git branch --show-current
+          git log --oneline -n 3
+
+      - name: Check if branch has commits ahead of main
+        id: ahead
+        run: |
+          set -euo pipefail
+
+          BRANCH="${{ github.ref_name }}"
+          git fetch origin main
+          COUNT=$(git rev-list --count origin/main.."$BRANCH" || echo 0)
+
+          echo "Commits ahead of main: $COUNT"
+
+          if [ "$COUNT" -gt 0 ]; then
+            echo "has_commits=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_commits=false" >> "$GITHUB_OUTPUT"
+          fi
 
       - name: Check for open PR
         id: prcheck
+        if: steps.ahead.outputs.has_commits == 'true'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -35,8 +62,6 @@ jobs:
 
           BRANCH="${{ github.ref_name }}"
           BASE="main"
-
-          echo "Checking open PRs for branch: $BRANCH -> $BASE"
 
           PR_NUMBERS=$(gh pr list \
             --head "$BRANCH" \
@@ -54,7 +79,7 @@ jobs:
           fi
 
       - name: Create PR if not exists
-        if: steps.prcheck.outputs.found == 'false'
+        if: steps.ahead.outputs.has_commits == 'true' && steps.prcheck.outputs.found == 'false'
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
@@ -70,6 +95,7 @@ jobs:
           echo "Creating PR for branch: $BRANCH"
 
           gh pr create \
+            --repo "${{ github.repository }}" \
             --title "$TITLE" \
             --body "Automated PR for branch $BRANCH" \
             --base main \
