@@ -112,26 +112,17 @@ ${promptPatch}
   for (const issue of aiIssues) {
     if (!issue || typeof issue !== "object") continue;
 
-    const file = String(issue.file || "").trim();
-    const patchLine = Number(issue.patch_line);
-    const comment = String(issue.comment || "").trim();
-
-    if (!file || !Number.isInteger(patchLine) || patchLine <= 0 || !comment) continue;
-
-    const fc = fileContexts.find((x) => x.filename === file);
+    const fc = fileContexts.find((x) => x.filename === issue.file);
     if (!fc) continue;
 
-    const rec = fc.parsed.byPatchLine.get(patchLine);
-    if (!rec) continue;
-
-    if (rec.kind !== "add") continue;
-    if (!Number.isInteger(rec.newLine) || rec.newLine <= 0) continue;
+    const rec = fc.parsed.byPatchLine.get(issue.patch_line);
+    if (!rec || rec.kind !== "add") continue;
 
     comments.push({
       path: fc.filename,
       line: rec.newLine,
       side: "RIGHT",
-      body: `[AI Review]: ${comment}`,
+      body: `[AI Review]: ${issue.comment}`,
     });
   }
 
@@ -169,9 +160,9 @@ async function callGitHubModel(prompt, token) {
 
   for (const model of models) {
     try {
-      console.log("Trying:", model);
+      console.log("Trying model:", model);
 
-      const res = await fetch("https://models.inference.ai.azure.com/chat/completions", {
+      const res = await fetch("https://models.github.ai/inference/chat/completions", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -180,15 +171,17 @@ async function callGitHubModel(prompt, token) {
         body: JSON.stringify({
           model,
           messages: [
-            {
-              role: "system",
-              content: "Return ONLY JSON array. No explanation."
-            },
+            { role: "system", content: "Return ONLY JSON array." },
             { role: "user", content: prompt }
           ],
-          temperature: 0.2,
-        }),
+          temperature: 0.2
+        })
       });
+
+      if (!res.ok) {
+        console.log("Model failed:", model, await safeBody(res));
+        continue;
+      }
 
       const data = await res.json();
       let text = data?.choices?.[0]?.message?.content;
