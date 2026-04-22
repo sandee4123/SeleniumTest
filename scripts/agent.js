@@ -1,10 +1,13 @@
+const { GoogleGenerativeAI } = require("@google/generative-ai");
+
 async function run() {
   const token = process.env.GITHUB_TOKEN;
   const repo = process.env.GITHUB_REPOSITORY;
   const ref = process.env.GITHUB_REF || "";
+  const geminiKey = process.env.GEMINI_API_KEY;
 
-  if (!token || !repo) {
-    console.error("Missing required env vars: GITHUB_TOKEN, GITHUB_REPOSITORY");
+  if (!token || !repo || !geminiKey) {
+    console.error("Missing required env vars: GITHUB_TOKEN, GITHUB_REPOSITORY, GEMINI_API_KEY");
     process.exit(1);
   }
 
@@ -23,12 +26,12 @@ async function run() {
   const pullNumber = Number(prMatch[1]);
 
   const ghHeaders = {
-    Authorization: `Bearer ${token}`,
+    Authorization: Bearer ${token},
     Accept: "application/vnd.github+json",
   };
 
   const prRes = await fetch(
-    `https://api.github.com/repos/${owner}/${repoName}/pulls/${pullNumber}`,
+    https://api.github.com/repos/${owner}/${repoName}/pulls/${pullNumber},
     { headers: ghHeaders }
   );
 
@@ -71,16 +74,17 @@ async function run() {
   const promptPatch = fileContexts
     .map((fc) => {
       const rendered = fc.parsed.lines
-        .map((l) => `[P${l.patchLine}] ${l.raw}`)
+        .map((l) => [P${l.patchLine}] ${l.raw})
         .join("\n");
-      return `FILE: ${fc.filename}\n${rendered}`;
+      return FILE: ${fc.filename}\n${rendered};
     })
     .join("\n\n")
     .slice(0, 18000);
 
-  const prompt = `
-You MUST return ONLY valid JSON array. No text, no explanation.
+const prompt = `
+You are a strict senior code reviewer focused on correctness, maintainability, and test automation best practices.
 
+Return ONLY valid JSON array:
 [
   {
     "file": "exact/path/from_FILE_header",
@@ -90,13 +94,51 @@ You MUST return ONLY valid JSON array. No text, no explanation.
   }
 ]
 
+Rules:
+- "file" must exactly match a FILE header path.
+- "patch_line" must be the numeric value from [P<number>] in that file block.
+- Select ONLY added code lines (those beginning with "+").
+- Do NOT use metadata lines, hunk headers, deleted lines, or context lines.
+- Only report issues visible in the provided patch.
+- No duplicates, no hallucinations, concise comments.
+
+Review priorities (highest to lower):
+1) Correctness / bugs
+2) Security and reliability risks
+3) Maintainability and readability
+4) Test automation best practices
+
+Code quality checks to enforce:
+- Naming conventions:
+  - Class names should be clear PascalCase nouns (avoid vague/misspelled/abbreviated names).
+  - Method names should be clear lowerCamelCase verbs.
+  - Variable names should be descriptive lowerCamelCase; avoid single-letter names except very small loop indices.
+  - Flag unclear, inconsistent, misspelled, or non-intent-revealing names.
+- Readability:
+  - Flag magic values where a named constant would improve clarity.
+  - Flag long/complex inline expressions that hurt readability.
+- Selenium locator best practice:
+  - Locators should be stored in variables/constants (e.g., By fields/constants), not embedded inline in interaction calls.
+  - Flag patterns like driver.findElement(By.xpath("...")).click() or waits with inline By if locator constants/variables are not used.
+  - Prefer reusable locator definitions to improve maintainability.
+- Consistency:
+  - Flag mixed naming styles within the same file or related symbols.
+
+Comment style requirements:
+- Be specific: mention what is wrong and the expected better pattern.
+- Keep each comment one issue only.
+- Keep comments short and actionable.
+- Do not suggest changes outside visible patch lines.
+
 Code:
 ${promptPatch}
 `;
 
+  const genAI = new GoogleGenerativeAI(geminiKey);
+
   let aiText;
   try {
-    aiText = await callGitHubModel(prompt, token);
+    aiText = await callGemini(genAI, prompt);
   } catch (e) {
     console.error("AI request failed:", e?.message || e);
     return;
@@ -112,95 +154,96 @@ ${promptPatch}
   for (const issue of aiIssues) {
     if (!issue || typeof issue !== "object") continue;
 
-    const fc = fileContexts.find((x) => x.filename === issue.file);
+    const file = String(issue.file || "").trim();
+    const patchLine = Number(issue.patch_line);
+    const comment = String(issue.comment || "").trim();
+
+    if (!file || !Number.isInteger(patchLine) || patchLine <= 0 || !comment) continue;
+
+    const fc = fileContexts.find((x) => x.filename === file);
     if (!fc) continue;
 
-    const rec = fc.parsed.byPatchLine.get(issue.patch_line);
-    if (!rec || rec.kind !== "add") continue;
+    const rec = fc.parsed.byPatchLine.get(patchLine);
+    if (!rec) continue;
+
+    if (rec.kind !== "add") continue;
+    if (!Number.isInteger(rec.newLine) || rec.newLine <= 0) continue;
 
     comments.push({
       path: fc.filename,
       line: rec.newLine,
       side: "RIGHT",
-      body: `[AI Review]: ${issue.comment}`,
+      body: [AI Review]: ${comment},
     });
   }
 
-  if (!comments.length) {
-    console.log("No valid mappable comments");
-    return;
-  }
+  const seen = new Set();
+  comments = comments.filter((c) => {
+    const key = ${c.path}:${c.line}:${normalizeText(c.body)};
+    if (seen.has(key)) return false;
+    seen.add(key);
+    return true;
+  });
 
-  const res = await fetch(
-    `https://api.github.com/repos/${owner}/${repoName}/pulls/${pullNumber}/reviews`,
-    {
-      method: "POST",
-      headers: {
-        ...ghHeaders,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        commit_id: commitId,
-        event: "COMMENT",
-        comments,
-      }),
-    }
+  const existing = await fetchExistingReviewComments(owner, repoName, pullNumber, ghHeaders);
+  const existingKeys = new Set(
+    existing.map((c) => ${c.path || c?.original_path || ""}:${c.line || c.original_line || ""}:${normalizeText(c.body)})
   );
 
-  if (!res.ok) {
-    console.error("GitHub API error:", await safeBody(res));
+  comments = comments.filter((c) => {
+    const key = ${c.path}:${c.line}:${normalizeText(c.body)};
+    return !existingKeys.has(key);
+  });
+
+  if (!comments.length) {
+    console.log("No valid mappable comments after dedupe");
     return;
   }
 
-  console.log(`Posted ${comments.length} comments`);
-}
+  comments.sort((a, b) => {
+    if (a.path === b.path) return a.line - b.line;
+    return a.path.localeCompare(b.path);
+  });
 
-async function callGitHubModel(prompt, token) {
-  const models = ["gpt-4o-mini", "gpt-4o"];
+  const payloadComments = comments.map(({ path, line, side, body }) => ({
+    path,
+    line,
+    side,
+    body,
+  }));
 
-  for (const model of models) {
-    try {
-      console.log("Trying model:", model);
+  const chunkSize = 30;
+  let posted = 0;
 
-      const res = await fetch("https://models.github.ai/inference/chat/completions", {
+  for (let i = 0; i < payloadComments.length; i += chunkSize) {
+    const batch = payloadComments.slice(i, i + chunkSize);
+
+    const res = await fetch(
+      https://api.github.com/repos/${owner}/${repoName}/pulls/${pullNumber}/reviews,
+      {
         method: "POST",
         headers: {
+          ...ghHeaders,
           "Content-Type": "application/json",
-          Authorization: `Bearer ${token}`,
         },
         body: JSON.stringify({
-          model,
-          messages: [
-            { role: "system", content: "Return ONLY JSON array." },
-            { role: "user", content: prompt }
-          ],
-          temperature: 0.2
-        })
-      });
-
-      if (!res.ok) {
-        console.log("Model failed:", model, await safeBody(res));
-        continue;
+          commit_id: commitId,
+          event: "COMMENT",
+          comments: batch,
+        }),
       }
+    );
 
-      const data = await res.json();
-      let text = data?.choices?.[0]?.message?.content;
-
-      if (!text) continue;
-
-      text = text.replace(/```json|```/g, "").trim();
-
-      console.log("Model used:", model);
-      console.log("RAW RESPONSE:\n", text);
-
-      return text;
-
-    } catch (e) {
+    const body = await safeBody(res);
+    if (!res.ok) {
+      console.error("GitHub API error:", body);
       continue;
     }
+
+    posted += batch.length;
   }
 
-  throw new Error("All models failed");
+  console.log(Posted ${posted} comments);
 }
 
 async function fetchAllPrFiles(owner, repoName, pullNumber, headers) {
@@ -209,11 +252,40 @@ async function fetchAllPrFiles(owner, repoName, pullNumber, headers) {
 
   while (true) {
     const res = await fetch(
-      `https://api.github.com/repos/${owner}/${repoName}/pulls/${pullNumber}/files?per_page=100&page=${page}`,
+      https://api.github.com/repos/${owner}/${repoName}/pulls/${pullNumber}/files?per_page=100&page=${page},
       { headers }
     );
 
-    if (!res.ok) break;
+    if (!res.ok) {
+      console.error("Failed to fetch PR files page", page, ":", await safeBody(res));
+      break;
+    }
+
+    const chunk = await res.json();
+    if (!Array.isArray(chunk) || chunk.length === 0) break;
+
+    all.push(...chunk);
+    if (chunk.length < 100) break;
+    page++;
+  }
+
+  return all;
+}
+
+async function fetchExistingReviewComments(owner, repoName, pullNumber, headers) {
+  const all = [];
+  let page = 1;
+
+  while (true) {
+    const res = await fetch(
+      https://api.github.com/repos/${owner}/${repoName}/pulls/${pullNumber}/comments?per_page=100&page=${page},
+      { headers }
+    );
+
+    if (!res.ok) {
+      console.error("Failed to fetch existing review comments page", page, ":", await safeBody(res));
+      break;
+    }
 
     const chunk = await res.json();
     if (!Array.isArray(chunk) || chunk.length === 0) break;
@@ -276,6 +348,26 @@ function parsePatchWithAbsoluteLines(patch) {
   return { lines: parsedLines, byPatchLine };
 }
 
+async function callGemini(genAI, prompt) {
+  const models = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
+
+  for (const modelName of models) {
+    try {
+      console.log(Trying model: ${modelName});
+      const model = genAI.getGenerativeModel({ model: modelName });
+      const res = await model.generateContent(prompt);
+      const text = res?.response?.text?.();
+      if (text && text.trim()) return text;
+    } catch (e) {
+      const msg = String(e?.message || "");
+      if (msg.includes("429") || msg.includes("503")) continue;
+      throw e;
+    }
+  }
+
+  throw new Error("All Gemini models failed");
+}
+
 function parseJSON(text) {
   try {
     return JSON.parse(text);
@@ -290,15 +382,23 @@ function parseJSON(text) {
   }
 }
 
+function normalizeText(text) {
+  return String(text || "").toLowerCase().replace(/\s+/g, " ").trim();
+}
+
 async function safeBody(res) {
   try {
     return await res.json();
   } catch {
-    return await res.text();
+    try {
+      return await res.text();
+    } catch {
+      return "unreadable response";
+    }
   }
 }
 
 run().catch((e) => {
-  console.error("FATAL:", e);
+  console.error("FATAL:", e?.message || e);
   process.exit(1);
 });
