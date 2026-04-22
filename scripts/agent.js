@@ -110,17 +110,28 @@ ${promptPatch}
 
   let comments = [];
   for (const issue of aiIssues) {
-    const fc = fileContexts.find((x) => x.filename === issue.file);
+    if (!issue || typeof issue !== "object") continue;
+
+    const file = String(issue.file || "").trim();
+    const patchLine = Number(issue.patch_line);
+    const comment = String(issue.comment || "").trim();
+
+    if (!file || !Number.isInteger(patchLine) || patchLine <= 0 || !comment) continue;
+
+    const fc = fileContexts.find((x) => x.filename === file);
     if (!fc) continue;
 
-    const rec = fc.parsed.byPatchLine.get(issue.patch_line);
-    if (!rec || rec.kind !== "add") continue;
+    const rec = fc.parsed.byPatchLine.get(patchLine);
+    if (!rec) continue;
+
+    if (rec.kind !== "add") continue;
+    if (!Number.isInteger(rec.newLine) || rec.newLine <= 0) continue;
 
     comments.push({
       path: fc.filename,
       line: rec.newLine,
       side: "RIGHT",
-      body: `[AI Review]: ${issue.comment}`,
+      body: `[AI Review]: ${comment}`,
     });
   }
 
@@ -169,8 +180,11 @@ async function callGitHubModel(prompt, token) {
         body: JSON.stringify({
           model,
           messages: [
-            { role: "system", content: "Return ONLY JSON array." },
-            { role: "user", content: prompt },
+            {
+              role: "system",
+              content: "Return ONLY JSON array. No explanation."
+            },
+            { role: "user", content: prompt }
           ],
           temperature: 0.2,
         }),
@@ -184,9 +198,10 @@ async function callGitHubModel(prompt, token) {
       text = text.replace(/```json|```/g, "").trim();
 
       console.log("Model used:", model);
-      console.log("RAW:", text);
+      console.log("RAW RESPONSE:\n", text);
 
       return text;
+
     } catch (e) {
       continue;
     }
@@ -196,44 +211,86 @@ async function callGitHubModel(prompt, token) {
 }
 
 async function fetchAllPrFiles(owner, repoName, pullNumber, headers) {
-  const res = await fetch(
-    `https://api.github.com/repos/${owner}/${repoName}/pulls/${pullNumber}/files`,
-    { headers }
-  );
-  return await res.json();
+  const all = [];
+  let page = 1;
+
+  while (true) {
+    const res = await fetch(
+      `https://api.github.com/repos/${owner}/${repoName}/pulls/${pullNumber}/files?per_page=100&page=${page}`,
+      { headers }
+    );
+
+    if (!res.ok) break;
+
+    const chunk = await res.json();
+    if (!Array.isArray(chunk) || chunk.length === 0) break;
+
+    all.push(...chunk);
+    if (chunk.length < 100) break;
+    page++;
+  }
+
+  return all;
 }
 
 function parsePatchWithAbsoluteLines(patch) {
   const lines = patch.split("\n");
   const byPatchLine = new Map();
+  let oldLine = 0;
   let newLine = 0;
+  const parsedLines = [];
 
   for (let i = 0; i < lines.length; i++) {
     const raw = lines[i];
     const patchLine = i + 1;
+    let kind = "meta";
+    let old = null;
+    let neu = null;
 
-    if (raw.startsWith("@@")) {
-      const match = raw.match(/\+(\d+)/);
-      if (match) newLine = Number(match[1]);
+    const hunk = raw.match(/^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@/);
+    if (hunk) {
+      oldLine = Number(hunk[1]);
+      newLine = Number(hunk[2]);
+      kind = "hunk";
+    } else if (
+      raw.startsWith("diff --git") ||
+      raw.startsWith("index ") ||
+      raw.startsWith("--- ") ||
+      raw.startsWith("+++ ")
+    ) {
+      kind = "meta";
     } else if (raw.startsWith("+")) {
-      byPatchLine.set(patchLine, { kind: "add", newLine });
+      kind = "add";
+      neu = newLine;
       newLine++;
-    } else if (!raw.startsWith("-")) {
+    } else if (raw.startsWith("-")) {
+      kind = "del";
+      old = oldLine;
+      oldLine++;
+    } else {
+      kind = "context";
+      old = oldLine;
+      neu = newLine;
+      oldLine++;
       newLine++;
     }
+
+    const rec = { patchLine, raw, kind, oldLine: old, newLine: neu };
+    parsedLines.push(rec);
+    byPatchLine.set(patchLine, rec);
   }
 
-  return { byPatchLine };
+  return { lines: parsedLines, byPatchLine };
 }
 
 function parseJSON(text) {
   try {
     return JSON.parse(text);
   } catch {
-    const match = text.match(/\[[\s\S]*\]/);
-    if (!match) return [];
+    const m = text.match(/\[[\s\S]*\]/);
+    if (!m) return [];
     try {
-      return JSON.parse(match[0]);
+      return JSON.parse(m[0]);
     } catch {
       return [];
     }
