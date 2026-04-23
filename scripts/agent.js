@@ -82,7 +82,7 @@ async function run() {
     .slice(0, 18000);
 
   const prompt = `
-You are a strict senior code reviewer.
+You are a strict senior code reviewer focused on correctness, maintainability, and test automation best practices.
 
 Return ONLY valid JSON array:
 [
@@ -98,10 +98,47 @@ Rules:
 - "file" must exactly match a FILE header path.
 - "patch_line" must be the numeric value from [P<number>] in that file block.
 - Select ONLY added code lines (those beginning with "+").
-- Do not use metadata lines, hunk headers, deleted lines, or context lines.
+- Do NOT use metadata lines, hunk headers, deleted lines, or context lines.
 - Only report issues visible in the provided patch.
 - No duplicates, no hallucinations, concise comments.
+Review everything carefully and dont skip any category.
 
+Bugs:
+Check for null issues, wrong conditions, broken logic, or incorrect API usage.
+
+Security:
+Look for hardcoded credentials (usernames, passwords, tokens, card data) and any exposure of sensitive information.
+
+Selenium practices:
+Avoid inline locators inside actions; locators should be reusable.
+Flag absolute XPath and overly generic XPath (like //button or //div).
+Flag brittle selectors such as nth-child.
+Avoid Thread.sleep; proper waits should be used instead.
+Flag missing waits, pageSource-based validations, and any non-deterministic behavior.
+
+Maintainability:
+Avoid magic values; use constants.
+Flag hardcoded paths and mutable static variables.
+Identify repeated logic that should be reused.
+
+Test design:
+Check for proper setup and teardown.
+Ensure driver lifecycle is handled correctly (including quit).
+Flag weak or incomplete test structure.
+
+Naming:
+Names should clearly describe purpose.
+Avoid vague, abbreviated, or inconsistent naming.
+Use standard naming conventions for classes, methods, and variables.
+
+Readability:
+Flag complex or hard-to-read expressions.
+Highlight anything that makes the code harder to understand.
+Be thorough, but avoid repeating the same issue multiple times.
+
+STRICT MODE:
+- Do NOT skip small issues
+- Do NOT combine multiple issues
 Code:
 ${promptPatch}
 `;
@@ -110,7 +147,7 @@ ${promptPatch}
 
   let aiText;
   try {
-    aiText = await callGemini(genAI, prompt);
+    aiText = await callAI(prompt, genAI);
   } catch (e) {
     console.error("AI request failed:", e?.message || e);
     return;
@@ -159,7 +196,9 @@ ${promptPatch}
 
   const existing = await fetchExistingReviewComments(owner, repoName, pullNumber, ghHeaders);
   const existingKeys = new Set(
-    existing.map((c) => `${c.path || c?.original_path || ""}:${c.line || c.original_line || ""}:${normalizeText(c.body)}`)
+    existing.map((c) =>
+      `${c.path || c?.original_path || ""}:${c.line || c.original_line || ""}:${normalizeText(c.body)}`
+    )
   );
 
   comments = comments.filter((c) => {
@@ -320,24 +359,104 @@ function parsePatchWithAbsoluteLines(patch) {
   return { lines: parsedLines, byPatchLine };
 }
 
-async function callGemini(genAI, prompt) {
-  const models = ["gemini-2.5-flash", "gemini-2.5-flash-lite"];
+async function callAI(prompt, genAI) {
+  try {
+    return await tryGemini("gemini-2.5-flash", prompt, genAI);
+  } catch (e) {
+    console.log("Flash failed, trying 2.0...");
+  }
 
-  for (const modelName of models) {
+  try {
+    return await tryGemini("gemini-2.0-flash", prompt, genAI);
+  } catch (e) {
+    console.log("2.0 Flash failed, trying DeepSeek...");
+  }
+
+  try {
+    return await callOpenRouter(prompt);
+  } catch (e) {
+    console.log("DeepSeek failed, falling back to Lite...");
+  }
+
+  return await tryGemini("gemini-2.5-flash-lite", prompt, genAI);
+}
+
+async function tryGemini(modelName, prompt, genAI) {
+  const retries = 3;
+
+  for (let i = 0; i < retries; i++) {
     try {
-      console.log(`Trying model: ${modelName}`);
+      console.log(`Trying ${modelName} attempt ${i + 1}`);
+
       const model = genAI.getGenerativeModel({ model: modelName });
       const res = await model.generateContent(prompt);
       const text = res?.response?.text?.();
+
       if (text && text.trim()) return text;
+
     } catch (e) {
       const msg = String(e?.message || "");
-      if (msg.includes("429") || msg.includes("503")) continue;
+
+      if (msg.includes("429")) {
+        const delay = Math.pow(2, i) * 2000;
+        console.log(`429 on ${modelName}, waiting ${delay}ms`);
+        await new Promise(r => setTimeout(r, delay));
+        continue;
+      }
+
       throw e;
     }
   }
 
-  throw new Error("All Gemini models failed");
+  throw new Error(`${modelName} failed`);
+}
+
+// ONLY CHANGE: OpenRouter models fallback
+async function callOpenRouter(prompt) {
+  const apiKey = process.env.OPENROUTER_API_KEY;
+
+  if (!apiKey) throw new Error("Missing OPENROUTER_API_KEY");
+
+  console.log("Trying OpenRouter models");
+  console.log("OpenRouter key exists:", !!apiKey);
+
+  const models = [
+    "qwen/qwen3-coder:free",
+    "deepseek/deepseek-chat",
+    "meta-llama/llama-3.3-70b-instruct:free",
+    "nvidia/nemotron-3-super-120b-a12b:free"
+  ];
+
+  for (const model of models) {
+    try {
+      console.log("Trying OpenRouter model:", model);
+
+      const res = await fetch("https://openrouter.ai/api/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "Authorization": `Bearer ${apiKey}`,
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          model,
+          messages: [
+            { role: "system", content: prompt }
+          ],
+          temperature: 0.2
+        })
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) continue;
+
+      const text = data?.choices?.[0]?.message?.content;
+      if (text) return text;
+
+    } catch (e) {}
+  }
+
+  throw new Error("All OpenRouter models failed");
 }
 
 function parseJSON(text) {

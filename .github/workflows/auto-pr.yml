@@ -1,0 +1,109 @@
+name: Auto PR
+
+on:
+  push:
+    branches:
+      - '**'
+      - '!master'
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  create-pr:
+    if: github.actor != 'github-actions[bot]'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repo
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Git identity
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+      - name: Show branch and commit info
+        run: |
+          echo "ref_name=${{ github.ref_name }}"
+          echo "ref=${{ github.ref }}"
+          echo "sha=${{ github.sha }}"
+          git status
+          git branch --show-current
+          git log --oneline -n 3
+
+      - name: Check if branch has commits ahead of master
+        id: ahead
+        run: |
+          set -euo pipefail
+
+          BRANCH="${{ github.ref_name }}"
+          BASE="master"
+
+          git fetch origin "$BASE"
+
+          COUNT=$(git rev-list --count "origin/$BASE..$BRANCH" || echo 0)
+
+          echo "Commits ahead of $BASE: $COUNT"
+
+          if [ "$COUNT" -gt 0 ]; then
+            echo "has_commits=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "has_commits=false" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Check for open PR
+        id: prcheck
+        if: steps.ahead.outputs.has_commits == 'true'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          BRANCH="${{ github.ref_name }}"
+          BASE="master"
+
+          PR_NUMBERS=$(gh pr list \
+            --repo "${{ github.repository }}" \
+            --head "$BRANCH" \
+            --base "$BASE" \
+            --state open \
+            --json number \
+            --jq '.[].number')
+
+          if [ -z "$PR_NUMBERS" ]; then
+            echo "found=false" >> "$GITHUB_OUTPUT"
+            echo "No open PR found"
+          else
+            echo "found=true" >> "$GITHUB_OUTPUT"
+            echo "Open PR(s): $PR_NUMBERS"
+          fi
+
+      - name: Create PR if not exists
+        if: steps.ahead.outputs.has_commits == 'true' && steps.prcheck.outputs.found == 'false'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -euo pipefail
+
+          BRANCH="${{ github.ref_name }}"
+          TITLE=$(git log -1 --pretty=%s)
+
+          if [ -z "$TITLE" ]; then
+            TITLE="Auto PR: $BRANCH"
+          fi
+
+          echo "Creating PR for branch: $BRANCH"
+
+          gh pr create \
+            --repo "${{ github.repository }}" \
+            --title "$TITLE" \
+            --body "Automated PR for branch $BRANCH" \
+            --base master \
+            --head "$BRANCH"
+
+      - name: Done
+        run: echo "Workflow complete"
