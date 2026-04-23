@@ -64,7 +64,7 @@ public class E2ETest {
         search.clear();
         search.sendKeys("laptop");
 
-        Thread.sleep(1000);
+        Thread.sleep(2000);
 
         search.sendKeys(Keys.ENTER);
 
