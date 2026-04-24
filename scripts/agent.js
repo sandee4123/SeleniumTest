@@ -71,15 +71,18 @@ async function run() {
     parsed: parsePatchWithAbsoluteLines(f.patch),
   }));
 
-  const promptPatch = fileContexts
-    .map((fc) => {
-      const rendered = fc.parsed.lines
-        .map((l) => `[P${l.patchLine}] ${l.raw}`)
-        .join("\n");
-      return `FILE: ${fc.filename}\n${rendered}`;
-    })
-    .join("\n\n")
-    .slice(0, 18000);
+  let promptPatch = "";
+  for (const fc of fileContexts) {
+    const rendered = fc.parsed.lines
+      .map((l) => `[P${l.patchLine}] ${l.raw}`)
+      .join("\n");
+    const block = `FILE: ${fc.filename}\n${rendered}\n\n`;
+    if ((promptPatch + block).length > 18000) {
+      console.log(`Skipping ${fc.filename} — prompt size limit reached`);
+      break;
+    }
+    promptPatch += block;
+  }
 
   const prompt = `
 You are a strict senior code reviewer focused on correctness, maintainability, and test automation best practices.
@@ -411,7 +414,6 @@ async function tryGemini(modelName, prompt, genAI) {
   throw new Error(`${modelName} failed`);
 }
 
-// ONLY CHANGE: OpenRouter models fallback
 async function callOpenRouter(prompt) {
   const apiKey = process.env.OPENROUTER_API_KEY;
 
