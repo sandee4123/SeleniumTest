@@ -161,33 +161,58 @@ ${promptPatch}
     console.log("No issues found by AI");
     return;
   }
+let comments = [];
 
-  let comments = [];
-  for (const issue of aiIssues) {
-    if (!issue || typeof issue !== "object") continue;
+// group by file + patch_line
+const grouped = new Map();
 
-    const file = String(issue.file || "").trim();
-    const patchLine = Number(issue.patch_line);
-    const comment = String(issue.comment || "").trim();
+for (const issue of aiIssues) {
+  if (!issue || typeof issue !== "object") continue;
 
-    if (!file || !Number.isInteger(patchLine) || patchLine <= 0 || !comment) continue;
+  const file = String(issue.file || "").trim();
+  const patchLine = Number(issue.patch_line);
+  const comment = String(issue.comment || "").trim();
 
-    const fc = fileContexts.find((x) => x.filename === file);
-    if (!fc) continue;
+  if (!file || !Number.isInteger(patchLine) || patchLine <= 0 || !comment) continue;
 
-    const rec = fc.parsed.byPatchLine.get(patchLine);
-    if (!rec) continue;
+  const key = `${file}:${patchLine}`;
 
-    if (rec.kind !== "add") continue;
-    if (!Number.isInteger(rec.newLine) || rec.newLine <= 0) continue;
+  if (!grouped.has(key)) grouped.set(key, []);
+  grouped.get(key).push(comment);
+}
 
-    comments.push({
-      path: fc.filename,
-      line: rec.newLine,
-      side: "RIGHT",
-      body: `[AI Review]: ${comment}`,
-    });
+// build merged comments
+for (const [key, commentList] of grouped.entries()) {
+  const [file, patchLineStr] = key.split(":");
+  const patchLine = Number(patchLineStr);
+
+  const fc = fileContexts.find((x) => x.filename === file);
+  if (!fc) continue;
+
+  const rec = fc.parsed.byPatchLine.get(patchLine);
+  if (!rec) continue;
+
+  if (rec.kind !== "add") continue;
+  if (!Number.isInteger(rec.newLine) || rec.newLine <= 0) continue;
+
+  const unique = [...new Set(commentList)];
+
+  let body;
+  if (unique.length === 1) {
+    body = `[AI Review]: ${unique[0]}`;
+  } else {
+    body =
+      `[AI Review]:\n` +
+      unique.map((c, i) => `${i + 1}. ${c}`).join("\n");
   }
+
+  comments.push({
+    path: file,
+    line: rec.newLine,
+    side: "RIGHT",
+    body,
+  });
+}
 
   const seen = new Set();
   comments = comments.filter((c) => {
